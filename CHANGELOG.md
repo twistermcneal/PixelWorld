@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+- eigener Attribute Encoder für Klasse, Aktion und Trigger
+- eigener Attribute Slot Decoder mit gemeinsam genutzten Slot Queries
+- Geometry-, Presence- und Transition-Pfade gegenüber 0.5.1 unverändert
+- kontrollierter A/B-Test gegen die geteilte Slot-Repräsentation aus 0.5.1
+
 ## 0.5.1
 
 - Seed-Token-Target, 256-Klassen-Kopf, Loss und MAE-Metrik entfernt

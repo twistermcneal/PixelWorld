@@ -1,4 +1,4 @@
-# Architektur von PixelWorld 0.5.1
+# Architektur von PixelWorld 0.5.2
 
 ## Ziel
 
@@ -35,11 +35,11 @@ Die Größen sind in 0.5 noch an die Klasse gebunden:
 | Room | Raumgeometrie | vier ordinale Koordinaten |
 | Position | relative Slotposition | X/Y je Slot |
 | Presence | Slot vorhanden | binäres Logit je Slot |
-| Class | Objektart | vier Klassen |
-| Action | mögliche Aktion | drei Klassen |
-| Trigger | Übergangstyp | vier Klassen |
+| Class | Objektart über Attribute Encoder | vier Klassen |
+| Action | mögliche Aktion über Attribute Encoder | drei Klassen |
+| Trigger | Übergangstyp über Attribute Encoder | vier Klassen |
 
-Presence besitzt einen eigenen Encoder. Dadurch konkurriert die Anwesenheitserkennung nicht mit dem stärker gewichteten Positions-Loss.
+Presence und Attribute besitzen eigene Encoder. Dadurch konkurrieren weder Anwesenheit noch Klasse, Aktion und Trigger mit dem stärker gewichteten Positions-Loss.
 
 ## Maps
 
@@ -53,7 +53,7 @@ Beim Anklicken eines Pixels löst die Object Map zunächst die Slot-ID auf. Akti
 
 Die Geometry- und Presence-Pfade übertragen sich stabil auf acht variable Slots. Klassen, Aktionen und Trigger werden überwiegend richtig erkannt, sind aber noch deutlich von vollständiger Zuverlässigkeit entfernt. Kleine Klassen verlieren bei einer falschen Klasse oder einem Pixel Versatz überproportional IoU.
 
-Der Seed-Token-Kopf aus 0.5 ist entfernt. Ein ordinal vorhergesagter Identitätswert war semantisch fragwürdig: Benachbarte Token sind nicht automatisch ähnliche Folgewelten. 0.5.1 berechnet Übergänge stattdessen deterministisch und exakt reproduzierbar.
+Der Seed-Token-Kopf aus 0.5 ist entfernt. Ein ordinal vorhergesagter Identitätswert war semantisch fragwürdig: Benachbarte Token sind nicht automatisch ähnliche Folgewelten. Seit 0.5.1 werden Übergänge deterministisch berechnet. 0.5.2 trennt zusätzlich den Attribute Encoder vom Geometry Encoder.
 
 ## Aktuelle Grenzen
 
