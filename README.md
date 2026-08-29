@@ -4,7 +4,7 @@ PixelWorld erforscht einen generativen Weltbaukasten, der aus `Prompt + Seed` ei
 
 ## Aktueller Stand
 
-**Version 0.5 – Meilenstein 2 (Experiment)**
+**Version 0.5.1 – deterministische Weltübergänge**
 
 Das Modell erzeugt einen Raum mit bis zu acht variablen Object Slots. Jeder vorhandene Slot enthält:
 
@@ -12,7 +12,7 @@ Das Modell erzeugt einen Raum mit bis zu acht variablen Object Slots. Jeder vorh
 - relative X/Y-Position im Raum
 - Aktion: `LOOK`, `USE` oder `SCAN`
 - Trigger: `NONE`, `WORLD`, `STORY` oder `SECRET`
-- Seed-Token für deterministische Folgewelten
+- deterministisch abgeleitete Folgewelt-ID
 
 Der Scene Graph wird deterministisch in Semantic-, Object- und Interaction-Maps gerastert. Ein Klick kann dadurch einem Objekt und dessen Folgewelt zugeordnet werden, ohne Logik aus dem Bild zurückraten zu müssen.
 
@@ -30,7 +30,7 @@ Der Scene Graph wird deterministisch in Semantic-, Object- und Interaction-Maps 
 | Seed-Token MAE | 65,1 |
 | Seed-Token Exact Accuracy | 0,0 |
 
-Meilenstein 2 bestätigt variable Slots und interaktive Metadaten. Der Seed-Token-Kopf ist noch nicht brauchbar und wird ausdrücklich nicht als gelöst betrachtet.
+Der 0.5-Referenzlauf bestätigt variable Slots und interaktive Metadaten. Der dort gescheiterte Seed-Token-Kopf wurde in 0.5.1 vollständig entfernt: Folgewelten werden nun reproduzierbar aus Welt-Seed, Slot-ID, Trigger-Typ und Story-State abgeleitet.
 
 ## Schnellstart
 
@@ -43,7 +43,7 @@ pip install -r requirements.txt
 jupyter lab
 ```
 
-Danach [`notebooks/PixelWorld_0_5.ipynb`](notebooks/PixelWorld_0_5.ipynb) öffnen und die Zellen der Reihe nach ausführen.
+Danach [`notebooks/PixelWorld_0_5_1.ipynb`](notebooks/PixelWorld_0_5_1.ipynb) öffnen und die Zellen der Reihe nach ausführen. Das ursprüngliche [`0.5-Notebook`](notebooks/PixelWorld_0_5.ipynb) bleibt als Vergleich erhalten.
 
 Das Referenzexperiment verwendet 10.000 synthetische Welten, Batchgröße 128 und 40 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
 
@@ -53,7 +53,7 @@ Das Referenzexperiment verwendet 10.000 synthetische Welten, Batchgröße 128 un
 Prompt + Seed
 ├─ Geometry Encoder → Raum und relative Slotpositionen
 ├─ Presence Encoder → vorhandene Slots
-└─ Slot Decoder → Klasse, Aktion, Trigger und Seed-Token
+└─ Slot Decoder → Klasse, Aktion und Trigger
                        ↓
               strukturierter Scene Graph
                        ↓
@@ -77,7 +77,7 @@ Das Notebook enthält Generator, Targets, Modell, Training, Auswertung, Visualis
 
 ## Roadmap
 
-- Seed-Token aus der Modellvorhersage herauslösen oder über einen eigenen Pfad lernen
+- deterministische Übergänge über verzweigte Story-States validieren
 - permutation-invariantes Slot-Matching
 - freie Pixelmasken und Sprite-IDs
 - Beziehungen wie `on`, `inside`, `locked_by` und `leads_to`

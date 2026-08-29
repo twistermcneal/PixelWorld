@@ -1,4 +1,4 @@
-# Architektur von PixelWorld 0.5
+# Architektur von PixelWorld 0.5.1
 
 ## Ziel
 
@@ -11,7 +11,7 @@ So bleiben Darstellung, Interaktion und Übergänge synchron. Das Modell muss ke
 
 ## Repräsentation
 
-Eine Welt besteht aus einem rechteckigen Raum und maximal acht kanonisch geordneten Slots. Jeder Slot trägt Presence, Klasse, relative Position, Aktion, Trigger und Seed-Token.
+Eine Welt besteht aus einem rechteckigen Raum und maximal acht kanonisch geordneten Slots. Jeder Slot trägt Presence, Klasse, relative Position, Aktion und Trigger.
 
 Die absolute Objektposition wird berechnet als:
 
@@ -38,7 +38,6 @@ Die Größen sind in 0.5 noch an die Klasse gebunden:
 | Class | Objektart | vier Klassen |
 | Action | mögliche Aktion | drei Klassen |
 | Trigger | Übergangstyp | vier Klassen |
-| Seed | Folgeweltidentität | 256 ordinale Klassen |
 
 Presence besitzt einen eigenen Encoder. Dadurch konkurriert die Anwesenheitserkennung nicht mit dem stärker gewichteten Positions-Loss.
 
@@ -48,13 +47,13 @@ Presence besitzt einen eigenen Encoder. Dadurch konkurriert die Anwesenheitserke
 - **Object Map:** eindeutige Slot-ID jedes Objektpixels
 - **Interaction Map:** interaktive Pixelmaske
 
-Beim Anklicken eines Pixels löst die Object Map zunächst die Slot-ID auf. Aktion, Trigger und Seed-Token des Slots bestimmen anschließend die Reaktion oder Folgewelt.
+Beim Anklicken eines Pixels löst die Object Map zunächst die Slot-ID auf. Aktion und Trigger bestimmen die Reaktion. Die Folgewelt-ID entsteht deterministisch aus Welt-Seed, Slot-ID, Trigger-Typ und Story-State.
 
 ## Bewertung des Referenzlaufs
 
 Die Geometry- und Presence-Pfade übertragen sich stabil auf acht variable Slots. Klassen, Aktionen und Trigger werden überwiegend richtig erkannt, sind aber noch deutlich von vollständiger Zuverlässigkeit entfernt. Kleine Klassen verlieren bei einer falschen Klasse oder einem Pixel Versatz überproportional IoU.
 
-Der Seed-Token-Kopf ist gescheitert. Ein ordinal vorhergesagter Identitätswert ist semantisch fragwürdig: Benachbarte Token sind nicht automatisch ähnliche Folgewelten. Die nächste Version sollte den Folgewelt-Seed deterministisch aus Welt-ID, Slot-ID und Story-State ableiten oder einen diskreten, separat trainierten Identifikationspfad verwenden.
+Der Seed-Token-Kopf aus 0.5 ist entfernt. Ein ordinal vorhergesagter Identitätswert war semantisch fragwürdig: Benachbarte Token sind nicht automatisch ähnliche Folgewelten. 0.5.1 berechnet Übergänge stattdessen deterministisch und exakt reproduzierbar.
 
 ## Aktuelle Grenzen
 
@@ -66,4 +65,4 @@ Der Seed-Token-Kopf ist gescheitert. Ein ordinal vorhergesagter Identitätswert 
 
 ## Nächste Architekturarbeit
 
-Zuerst wird der Seed aus dem Multi-Task-Lernproblem entfernt. Danach folgt permutation-invariantes Matching. Animationen werden später als Zustand des Scene Graphs modelliert; der Renderer wählt wiederverwendbare Sprite-Frames und aktualisiert parallel die Logik-Maps.
+Nach der Validierung verzweigter Story-States folgt permutation-invariantes Matching. Animationen werden später als Zustand des Scene Graphs modelliert; der Renderer wählt wiederverwendbare Sprite-Frames und aktualisiert parallel die Logik-Maps.

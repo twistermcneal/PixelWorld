@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- Seed-Token-Target, 256-Klassen-Kopf, Loss und MAE-Metrik entfernt
+- Folgewelt-ID deterministisch aus Welt-Seed, Slot-ID, Trigger-Typ und Story-State abgeleitet
+- Slot-Latent von sieben auf sechs tatsächlich gelernte Merkmale reduziert
+- 0.5 bleibt als unveränderter Vergleichsstand erhalten
+
 ## 0.5 – Meilenstein 2
 
 - variable Anzahl von ein bis acht Object Slots
