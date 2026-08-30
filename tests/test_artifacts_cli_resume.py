@@ -1,10 +1,17 @@
 import json
+import os
 
 import pytest
 import torch
 
 from pixelworld import cli
-from pixelworld.artifacts import RunStore, atomic_json, validate_run_id
+from pixelworld.artifacts import (
+    RunStore,
+    atomic_json,
+    make_run_id,
+    resolve_output_subdirectory,
+    validate_run_id,
+)
 from pixelworld.config import RunConfig
 from pixelworld.training import run_training
 
@@ -43,10 +50,76 @@ def test_config_records_all_controlled_seeds(tmp_path):
     }
 
 
-@pytest.mark.parametrize("run_id", ["../escape", "..", "a/b", "a\\b", ""])
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "../escape",
+        "..",
+        "a/b",
+        "a\\b",
+        "",
+        "trailing.",
+        "CON",
+        "con.json",
+        "PRN.txt",
+        "aux.log",
+        "NUL.data",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"com{number}.json" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+        *(f"lpt{number}.txt" for number in range(1, 10)),
+    ],
+)
 def test_invalid_run_id_and_path_traversal(run_id):
     with pytest.raises(ValueError):
         validate_run_id(run_id)
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ["CONSOLE", "COM0", "COM10", "LPT0", "LPT10", "run.con", "valid.run-id_1"],
+)
+def test_windows_like_but_valid_run_ids(run_id):
+    assert validate_run_id(run_id) == run_id
+
+
+def test_automatic_run_ids_are_readable_and_collision_resistant():
+    first = make_run_id(42)
+    second = make_run_id(42)
+    assert first != second
+    assert "-seed42-" in first
+    assert validate_run_id(first) == first
+
+
+def test_oracle_path_must_be_an_outputs_subdirectory(tmp_path):
+    oracle = tmp_path / "outputs" / "oracle"
+    oracle.mkdir(parents=True)
+    assert resolve_output_subdirectory(tmp_path, "outputs/oracle") == oracle.resolve()
+    assert resolve_output_subdirectory(tmp_path, oracle) == oracle.resolve()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for unsafe in ("outputs/../outside", outside, "outputs"):
+        with pytest.raises(ValueError, match="Oracle path"):
+            resolve_output_subdirectory(tmp_path, unsafe)
+
+
+def test_oracle_path_rejects_symlink_escape(tmp_path):
+    outputs = tmp_path / "outputs"
+    outside = tmp_path / "outside"
+    outputs.mkdir()
+    outside.mkdir()
+    link = outputs / "escaped-oracle"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except OSError as error:
+        if os.name != "nt":
+            pytest.skip(f"directory symlinks unavailable: {error}")
+        import _winapi
+
+        _winapi.CreateJunction(str(outside), str(link))
+    with pytest.raises(ValueError, match="Oracle path"):
+        resolve_output_subdirectory(tmp_path, "outputs/escaped-oracle")
 
 
 def test_unknown_run_id(tmp_path):

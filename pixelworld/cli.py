@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from .artifacts import RunStore, atomic_json, list_runs
+from .artifacts import RunStore, atomic_json, list_runs, resolve_output_subdirectory
 from .config import RunConfig
 from .evaluation import evaluate_model
 from .golden import compare_run_to_oracle
@@ -127,7 +127,7 @@ def command_resume(args):
 
 def command_golden(args):
     store = RunStore.open(REPOSITORY_ROOT, args.run)
-    oracle = (REPOSITORY_ROOT / args.oracle).resolve()
+    oracle = resolve_output_subdirectory(REPOSITORY_ROOT, args.oracle)
     result = compare_run_to_oracle(store.path, oracle)
     atomic_json(store.path / "golden_comparison.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))

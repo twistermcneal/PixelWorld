@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -17,6 +18,14 @@ from .config import RunConfig
 
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 VALID_STATUSES = {"queued", "running", "completed", "failed", "aborted"}
 HISTORY_FIELDS = (
     "epoch",
@@ -34,13 +43,34 @@ HISTORY_FIELDS = (
 
 
 def validate_run_id(run_id: str) -> str:
-    if not RUN_ID_PATTERN.fullmatch(run_id) or run_id in {".", ".."}:
+    windows_stem = run_id.split(".", 1)[0].upper()
+    if (
+        not RUN_ID_PATTERN.fullmatch(run_id)
+        or run_id.endswith(".")
+        or windows_stem in WINDOWS_RESERVED_NAMES
+    ):
         raise ValueError(f"Invalid run ID: {run_id!r}")
     return run_id
 
 
 def make_run_id(seed: int) -> str:
-    return datetime.now().strftime(f"pw061-%Y%m%d-%H%M%S-seed{seed}")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return f"pw061-{timestamp}-seed{seed}-{secrets.token_hex(4)}"
+
+
+def resolve_output_subdirectory(repository_root: Path, requested_path: str | Path) -> Path:
+    repository_root = repository_root.resolve(strict=True)
+    outputs_root = (repository_root / "outputs").resolve(strict=True)
+    requested = Path(requested_path)
+    candidate = requested if requested.is_absolute() else repository_root / requested
+    resolved = candidate.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(outputs_root)
+    except ValueError as error:
+        raise ValueError("Oracle path must be inside the repository outputs directory") from error
+    if relative == Path(".") or not resolved.is_dir():
+        raise ValueError("Oracle path must name a subdirectory of the repository outputs directory")
+    return resolved
 
 
 def atomic_json(path: Path, data: Any) -> None:
