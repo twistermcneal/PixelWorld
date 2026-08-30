@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 root = Path(__file__).resolve().parents[1]
-nb = json.loads((root / 'notebooks' / 'PixelWorld_0_6.ipynb').read_text())
+nb = json.loads((root / 'notebooks' / 'PixelWorld_0_6.ipynb').read_text(encoding='utf-8'))
 
 
 def set_cell(index, text):
@@ -306,7 +306,7 @@ for seed in eval_seeds:
 print('Terrain — IoU:',round(float(np.mean(metrics['terrain_iou'])),3),'Biome:',round(float(np.mean(metrics['biome'])),3),'Orientation:',round(float(np.mean(metrics['orientation'])),3),'Parameter-MAE:',round(float(np.mean(metrics['params'])),3))
 print('Placement — Region:',round(float(np.mean(metrics['region'])),3),'Anchor:',round(float(np.mean(metrics['anchor'])),3),'Position-MAE:',round(float(np.mean(metrics['position'])),3))
 print('Slots — Presence:',round(float(np.mean(metrics['presence'])),3),'Klasse:',round(float(np.mean(metrics['class'])),3),'Aktion:',round(float(np.mean(metrics['action'])),3),'Trigger:',round(float(np.mean(metrics['trigger'])),3),'Interaction IoU:',round(float(np.mean(metrics['interaction'])),3))
-print('Vegetation im Beispiel:',int(sample.vegetation.sum()),'Bäume; deterministischer Round-trip:',np.array_equal(sample.vegetation,scatter_vegetation(sample.terrain,sample.regions,sample.terrain_params,sample.seed)))
+print('Vegetation im Beispiel:',int(sample.vegetation.sum()),'Bäume; deterministischer Round-trip:',np.array_equal(sample.vegetation,generate_landscape(sample.prompt,sample.seed).vegetation))
 """)
 
 set_cell(10, """## Nächste Experimente
@@ -318,5 +318,5 @@ set_cell(10, """## Nächste Experimente
 """)
 
 out=root/'notebooks'/'PixelWorld_0_6_1.ipynb'
-out.write_text(json.dumps(nb,ensure_ascii=False,indent=1)+'\n')
+out.write_text(json.dumps(nb,ensure_ascii=False,indent=1)+'\n',encoding='utf-8')
 print(out)
