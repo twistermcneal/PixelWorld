@@ -36,18 +36,34 @@ Der 0.6-Referenzlauf bestätigt den Terrain Graph. 0.6.1 ersetzt die schwache ab
 
 Der vollständige Benchmark mit Trainingskurve und Visualisierung liegt unter [`results/0.6`](results/0.6/README.md).
 
-## Schnellstart
+## Core-Paket und CLI
 
-Voraussetzung ist Python 3.10 oder neuer. Eine CUDA-fähige PyTorch-Installation beschleunigt das Training, ist aber nicht zwingend erforderlich.
+PixelWorld 0.6.1 ist als wiederverwendbares Python-Paket organisiert. Notebook und CLI verwenden denselben Core für Weltgenerierung, Placement, Modell, Training, Evaluation und Inferenz.
 
-```bash
+Unter Windows PowerShell:
+
+```powershell
 python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-jupyter lab
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+python -m pixelworld.cli train --version 0.6.1
 ```
 
-Danach [`notebooks/PixelWorld_0_6_1.ipynb`](notebooks/PixelWorld_0_6_1.ipynb) öffnen und die Zellen der Reihe nach ausführen. Das [`0.6-Notebook`](notebooks/PixelWorld_0_6.ipynb) bleibt als Vergleich erhalten.
+PyTorch muss für CUDA mit einem zur lokalen Hardware passenden CUDA-Wheel installiert sein. Die allgemeine `requirements.txt` erzwingt kein bestimmtes CUDA-Wheel. Wenn `torch.cuda.is_available()` falsch ist, fällt PixelWorld automatisch auf CPU zurück; mit `--device cuda` wird stattdessen ein verständlicher Fehler ausgegeben.
+
+Die wichtigsten Befehle:
+
+```powershell
+python -m pixelworld.cli train --version 0.6.1 --samples 2000 --batch-size 128 --epochs 3 --seed 42
+python -m pixelworld.cli evaluate --run <run-id>
+python -m pixelworld.cli infer --run <run-id> --prompt "tropical coast beach forest rock portal" --seed 500000
+python -m pixelworld.cli runs
+python -m pixelworld.cli resume --run <run-id>
+```
+
+Läufe liegen unter `outputs/runs/<run-id>/`. `latest.pt` enthält den Recovery-Zustand, `final.pt` den abgeschlossenen Lauf. Status, Konfiguration, vollständige Loss-Historie, Evaluation, Laufzeiten und Hardwareinformationen werden daneben als JSON/CSV/Log gespeichert. Checkpoints und Statusdateien werden atomar ersetzt.
+
+Danach kann [`notebooks/PixelWorld_0_6_1.ipynb`](notebooks/PixelWorld_0_6_1.ipynb) als Forschungs- und Visualisierungsoberfläche geöffnet werden. Es importiert den gemeinsamen Core und enthält keine zweite Trainingsimplementierung. Das [`0.6-Notebook`](notebooks/PixelWorld_0_6.ipynb) bleibt als historischer Vergleich erhalten.
 
 Das 0.6.1-Referenzexperiment verwendet 14.000 synthetische Landschaften, Batchgröße 128 und 45 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
 
@@ -80,7 +96,9 @@ Weitere Details stehen in [`docs/architecture.md`](docs/architecture.md), die En
 - terrainrelative Landmark-Positionen über Region und Anchor
 - aktuell feste Objektgrößen pro Klasse
 
-Das Notebook enthält Generator, Targets, Modell, Training, Auswertung, Visualisierung und einen interaktiven Pixel-zu-Folgewelt-Prototyp in einer Datei.
+Der Golden-Test vergleicht alle ungerundeten Loss-Komponenten, zwölf Evaluationsmetriken und jeden Tensor des finalen Modellzustands mit `outputs/0.6.1-reference`. Einrichtung, Recovery und Validierungsbefehle sind in [`docs/core-cli.md`](docs/core-cli.md) dokumentiert.
+
+WebUI, Docker und PixelWorld 0.6.2 sind ausdrücklich spätere, getrennte Schritte.
 
 ## Roadmap
 
