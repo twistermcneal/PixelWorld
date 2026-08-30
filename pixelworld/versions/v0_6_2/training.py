@@ -15,7 +15,11 @@ from pixelworld.artifacts import (
     atomic_torch_save,
     capture_rng_state,
     checkpoint_sha256,
+    environment_provenance,
+    resolve_contained_run_path,
+    resolve_run_artifact,
     restore_rng_state,
+    validate_run_id,
 )
 from pixelworld.config import (
     ACTIONS,
@@ -28,7 +32,13 @@ from pixelworld.config import (
 )
 from pixelworld.training import masked_ce, ordinal_loss, resolve_device, seed_everything
 
-from .config import LAYOUT_DIM, SLOT_LATENT_DIM, PlacementConfig, STUDY_NAME
+from .config import (
+    LAYOUT_DIM,
+    SHARED_TARGET_SHA256,
+    SLOT_LATENT_DIM,
+    PlacementConfig,
+    STUDY_NAME,
+)
 from .generation import condition_vector, generate_landscape, scene_graph_arrays
 from .model import create_model
 
@@ -241,41 +251,47 @@ def train_one_epoch(objects, config, device):
 
 class PlacementRunStore:
     def __init__(self, repository_root, run_id):
-        from pixelworld.artifacts import validate_run_id
-
         self.repository_root = Path(repository_root).resolve()
         self.run_id = validate_run_id(run_id)
-        self.root = self.repository_root / "outputs" / "studies" / STUDY_NAME / "runs"
-        self.path = self.root / self.run_id
+        configured_root = self.repository_root / "outputs" / "studies" / STUDY_NAME / "runs"
+        self.root, self.path = resolve_contained_run_path(configured_root, self.run_id)
+
+    def artifact_path(self, filename):
+        return resolve_run_artifact(self.root, self.run_id, filename)
+
+    def secure_path(self):
+        _, current = resolve_contained_run_path(self.root, self.run_id)
+        return current
 
     @classmethod
     def create(cls, repository_root, config, run_id):
         store = cls(repository_root, run_id)
         store.root.mkdir(parents=True, exist_ok=True)
-        store.path.mkdir(exist_ok=False)
-        atomic_json(store.path / "config.json", config.to_dict())
+        path = store.secure_path()
+        path.mkdir(exist_ok=False)
+        atomic_json(store.artifact_path("config.json"), config.to_dict())
         store.status("queued")
-        (store.path / "training.log").write_text("", encoding="utf-8")
+        store.artifact_path("training.log").write_text("", encoding="utf-8")
         return store
 
     @classmethod
     def open(cls, repository_root, run_id):
         store = cls(repository_root, run_id)
-        if not (store.path / "config.json").is_file():
+        if not store.secure_path().is_dir() or not store.artifact_path("config.json").is_file():
             raise ValueError(f"Unknown 0.6.2 run ID: {run_id!r}")
         return store
 
     def config(self):
         return PlacementConfig.from_dict(
-            json.loads((self.path / "config.json").read_text(encoding="utf-8"))
+            json.loads(self.artifact_path("config.json").read_text(encoding="utf-8"))
         )
 
     def status(self, status, **details):
-        atomic_json(self.path / "status.json", {"run_id": self.run_id, "status": status, **details})
+        atomic_json(self.artifact_path("status.json"), {"run_id": self.run_id, "status": status, **details})
 
     def log(self, message):
         print(message, flush=True)
-        with (self.path / "training.log").open("a", encoding="utf-8") as handle:
+        with self.artifact_path("training.log").open("a", encoding="utf-8") as handle:
             handle.write(message + "\n")
 
 
@@ -298,17 +314,17 @@ HISTORY_FIELDS = (
 )
 
 
-def write_history(path, history):
-    atomic_json(path / "training_history.json", history)
-    temporary = path / "training_history.csv.tmp"
+def write_history(store, history):
+    atomic_json(store.artifact_path("training_history.json"), history)
+    temporary = store.artifact_path("training_history.csv.tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=HISTORY_FIELDS)
         writer.writeheader()
         writer.writerows(history)
-    temporary.replace(path / "training_history.csv")
+    temporary.replace(store.artifact_path("training_history.csv"))
 
 
-def checkpoint_payload(objects, config, history, completed_epochs, timings):
+def checkpoint_payload(objects, config, history, completed_epochs, timings, provenance):
     return {
         "format_version": 3,
         "pixelworld_version": config.version,
@@ -320,6 +336,9 @@ def checkpoint_payload(objects, config, history, completed_epochs, timings):
         "model_state_dict": objects.model.state_dict(),
         "optimizer_state_dict": objects.optimizer.state_dict(),
         "config": config.to_dict(),
+        "provenance": provenance,
+        "shared_target_sha256": SHARED_TARGET_SHA256,
+        "evaluation_seeds": list(config.evaluation_seeds),
         "rng_state": capture_rng_state(),
         "training_history": history,
         "timings": timings,
@@ -354,13 +373,27 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
     wall_started = time.perf_counter()
     try:
         objects = initialize_training(config, selected_device, store.log)
+        provenance = environment_provenance(
+            store.repository_root,
+            selected_device,
+            sum(parameter.numel() for parameter in objects.model.parameters()),
+        )
+        provenance.update(
+            {
+                "pixelworld_version": config.version,
+                "variant": config.variant,
+                "placement_config": config.to_dict(),
+                "shared_target_sha256": SHARED_TARGET_SHA256,
+                "evaluation_seeds": list(config.evaluation_seeds),
+            }
+        )
         history = []
         start_epoch = 0
         prior_total = 0.0
         prior_training = 0.0
         preparation = objects.dataset_preparation_seconds
         if resume:
-            latest = store.path / "latest.pt"
+            latest = store.artifact_path("latest.pt")
             if not latest.is_file():
                 raise ValueError(f"Run {store.run_id!r} has no latest.pt")
             payload = torch.load(latest, map_location=selected_device, weights_only=True)
@@ -387,10 +420,10 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
                 "epoch_seconds": [item["epoch_seconds"] for item in history],
             }
             atomic_torch_save(
-                store.path / "latest.pt",
-                checkpoint_payload(objects, config, history, epoch + 1, timings),
+                store.artifact_path("latest.pt"),
+                checkpoint_payload(objects, config, history, epoch + 1, timings, provenance),
             )
-            write_history(store.path, history)
+            write_history(store, history)
             store.log(
                 f"Epoch {epoch + 1:02d}: loss={record['loss']:.3f} "
                 f"placement={record['placement_loss']:.3f} offset={record['offset_loss']:.3f}"
@@ -404,18 +437,18 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             "total_seconds": prior_total + time.perf_counter() - wall_started,
             "epoch_seconds": [item["epoch_seconds"] for item in history],
         }
-        payload = checkpoint_payload(objects, config, history, config.epochs, timings)
-        atomic_torch_save(store.path / "final.pt", payload)
-        loaded_model, _ = load_checkpoint(store.path / "final.pt", config, selected_device)
+        payload = checkpoint_payload(objects, config, history, config.epochs, timings, provenance)
+        atomic_torch_save(store.artifact_path("final.pt"), payload)
+        loaded_model, _ = load_checkpoint(store.artifact_path("final.pt"), config, selected_device)
         metrics, diagnostics = evaluate_variant(loaded_model, config, selected_device)
         atomic_json(
-            store.path / "evaluation_metrics.json",
+            store.artifact_path("evaluation_metrics.json"),
             {"metrics": metrics, "diagnostics": diagnostics, "checkpoint_reloaded": True},
         )
         payload["evaluation_metrics"] = metrics
         payload["placement_diagnostics"] = diagnostics
-        atomic_torch_save(store.path / "final.pt", payload)
-        reloaded, _ = load_checkpoint(store.path / "final.pt", config, selected_device)
+        atomic_torch_save(store.artifact_path("final.pt"), payload)
+        reloaded, _ = load_checkpoint(store.artifact_path("final.pt"), config, selected_device)
         verification_metrics, _ = evaluate_variant(reloaded, config, selected_device)
         if verification_metrics != metrics:
             raise RuntimeError("Evaluation changed after checkpoint reload")
@@ -427,13 +460,16 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             "final_losses": history[-1],
             "metrics": metrics,
             "diagnostics": diagnostics,
-            "checkpoint_sha256": checkpoint_sha256(store.path / "final.pt"),
+            "provenance": provenance,
+            "shared_target_sha256": SHARED_TARGET_SHA256,
+            "evaluation_seeds": list(config.evaluation_seeds),
+            "checkpoint_sha256": checkpoint_sha256(store.artifact_path("final.pt")),
             "checkpoint_reload_verified": True,
             "device": str(selected_device),
             "gpu": torch.cuda.get_device_name(selected_device) if selected_device.type == "cuda" else None,
             "gpu_peak_allocated_bytes": torch.cuda.max_memory_allocated(selected_device) if selected_device.type == "cuda" else 0,
         }
-        atomic_json(store.path / "run_summary.json", summary)
+        atomic_json(store.artifact_path("run_summary.json"), summary)
         store.status("completed", completed_epochs=config.epochs)
         return summary
     except Exception as error:

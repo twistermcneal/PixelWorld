@@ -11,16 +11,34 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pixelworld.artifacts import atomic_json
+from pixelworld.artifacts import (
+    atomic_json,
+    checkpoint_sha256,
+    environment_provenance,
+    git_provenance,
+)
 from pixelworld.config import DEFAULT_EVALUATION_SEEDS, DEFAULT_PROMPT, LANDMARK_CLASSES, LANDMARK_SIZES, MAX_SLOTS, TERRAINS
 from pixelworld.evaluation import METRIC_NAMES, evaluate_model
 from pixelworld.generation import generate_landscape as generate_baseline
 from pixelworld.inference import load_model as load_baseline_model, predict as predict_baseline
 from pixelworld.placement import anchor_candidates as baseline_anchor_candidates, rasterize_landmarks as rasterize_baseline
-from pixelworld.training import scene_targets as baseline_scene_targets
+from pixelworld.training import resolve_device, scene_targets as baseline_scene_targets
 
-from .config import OFFSET_RADII, PlacementConfig, STUDY_NAME, VARIANTS
+from .config import (
+    CONDITION_DIM,
+    GENERATOR_TARGET_VERSION,
+    LAYOUT_DIM,
+    LOCAL_OFFSET_PIXELS,
+    OFFSET_RADII,
+    SHARED_TARGET_SHA256,
+    SLOT_LATENT_DIM,
+    TARGET_ANALYSIS_SCHEMA_VERSION,
+    PlacementConfig,
+    STUDY_NAME,
+    VARIANTS,
+)
 from .generation import generate_landscape, ground_truth_round_trip
+from .model import create_model
 from .placement import sorted_candidates, valid_candidates
 from .training import PlacementRunStore
 
@@ -427,15 +445,24 @@ def analyze_latent_structure(samples=14_000):
     def grouped(groups):
         return {str(key): summary(values) for key, values in sorted(groups.items())}
 
+    shared_target_sha256 = target_hasher.hexdigest()
+    if samples == 14_000 and shared_target_sha256 != SHARED_TARGET_SHA256:
+        raise RuntimeError(
+            "0.6.2 shared target digest changed: "
+            f"expected {SHARED_TARGET_SHA256}, got {shared_target_sha256}"
+        )
     return {
         "analysis_kind": "explicit_eight_latent_region_relative_anchors",
+        "analysis_schema_version": TARGET_ANALYSIS_SCHEMA_VERSION,
+        "generator_target_version": GENERATOR_TARGET_VERSION,
         "samples": samples,
         "objects": objects,
-        "slot_latent_dim": 8,
-        "layout_dim": 71,
-        "local_offset_pixels": 8,
+        "slot_latent_dim": SLOT_LATENT_DIM,
+        "layout_dim": LAYOUT_DIM,
+        "condition_dim": CONDITION_DIM,
+        "local_offset_pixels": LOCAL_OFFSET_PIXELS,
         "variants_share_generator_and_target_worlds": ["B", "C", "D", "E"],
-        "shared_target_sha256": target_hasher.hexdigest(),
+        "shared_target_sha256": shared_target_sha256,
         "raw_offset_targets": {
             "x": summary(raw_x),
             "y": summary(raw_y),
@@ -474,29 +501,170 @@ def analyze_latent_structure(samples=14_000):
     }
 
 
+def analysis_cache_is_compatible(candidate, samples=14_000):
+    expected = {
+        "analysis_kind": "explicit_eight_latent_region_relative_anchors",
+        "analysis_schema_version": TARGET_ANALYSIS_SCHEMA_VERSION,
+        "generator_target_version": GENERATOR_TARGET_VERSION,
+        "samples": samples,
+        "slot_latent_dim": SLOT_LATENT_DIM,
+        "layout_dim": LAYOUT_DIM,
+        "condition_dim": CONDITION_DIM,
+        "local_offset_pixels": LOCAL_OFFSET_PIXELS,
+        "shared_target_sha256": SHARED_TARGET_SHA256,
+    }
+    return isinstance(candidate, dict) and all(
+        candidate.get(key) == value for key, value in expected.items()
+    )
+
+
+def load_analysis_cache(path, samples=14_000):
+    try:
+        candidate = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return candidate if analysis_cache_is_compatible(candidate, samples) else None
+
+
+def require_clean_study_repository(repository_root):
+    provenance = git_provenance(repository_root)
+    if provenance["git_commit"] == "unknown" or provenance["git_dirty"] is None:
+        raise RuntimeError("study-placement requires a readable Git repository")
+    if provenance["git_dirty"]:
+        raise RuntimeError(
+            "study-placement requires a clean Git worktree; commit or stash changes first"
+        )
+    return provenance
+
+
+def require_study_commit(repository_root, expected_commit):
+    current = git_provenance(repository_root)
+    if current["git_dirty"]:
+        raise RuntimeError("Git worktree became dirty during study-placement")
+    if current["git_commit"] != expected_commit:
+        raise RuntimeError(
+            "Git commit changed during study-placement: "
+            f"expected {expected_commit}, got {current['git_commit']}"
+        )
+    return current
+
+
 def baseline_run_path(repository_root, seed):
     return Path(repository_root) / "outputs" / "0.6.1-reproducibility" / f"seed-{seed}"
 
 
+def _baseline_evaluation_seeds(summary, evaluation):
+    parameters = summary["training_parameters"]
+    explicit = evaluation.get("evaluation_seeds", parameters.get("evaluation_seeds"))
+    if explicit is not None:
+        return tuple(explicit)
+    expected_formula = "500000 + i * 7919 for i in range(30)"
+    if (
+        parameters.get("evaluation_seed_formula") == expected_formula
+        and parameters.get("evaluation_seed_count") == len(DEFAULT_EVALUATION_SEEDS)
+        and evaluation.get("evaluation_seed_count") == len(DEFAULT_EVALUATION_SEEDS)
+    ):
+        return tuple(DEFAULT_EVALUATION_SEEDS)
+    return None
+
+
+def baseline_run_metadata(path, seed, samples, batch_size, epochs):
+    path = Path(path)
+    summary_path = path / "run_summary.json"
+    evaluation_path = path / "evaluation_metrics.json"
+    history_json_path = path / "training_history.json"
+    history_csv_path = path / "training_history.csv"
+    checkpoint = path / "pixelworld_0_6_1_final.pt"
+    required = (
+        summary_path,
+        evaluation_path,
+        history_json_path,
+        history_csv_path,
+        checkpoint,
+    )
+    if not all(item.is_file() and item.stat().st_size > 0 for item in required):
+        raise ValueError("Frozen baseline artifacts are incomplete")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    history = json.loads(history_json_path.read_text(encoding="utf-8"))
+    with history_csv_path.open("r", encoding="utf-8", newline="") as handle:
+        history_csv = list(csv.DictReader(handle))
+    parameters = summary["training_parameters"]
+    expected_parameters = {
+        "version": "0.6.1",
+        "seed": seed,
+        "python_random_seed": seed,
+        "numpy_seed": seed,
+        "torch_seed": seed,
+        "training_samples": samples,
+        "batch_size": batch_size,
+        "epochs": epochs,
+        "learning_rate": 5e-4,
+        "optimizer": "AdamW",
+        "num_workers": 0,
+        "world_size": 64,
+        "max_slots": 8,
+        "hidden_size": 320,
+        "model_parameters": 1_643_892,
+        "loss_weights": {
+            "terrain": 1.0,
+            "placement": 2.0,
+            "presence": 1.0,
+            "class": 1.0,
+            "action": 1.0,
+            "trigger": 1.0,
+        },
+    }
+    if summary.get("status") != "completed" or summary.get("version") != "0.6.1":
+        raise ValueError("Frozen baseline summary is not a completed 0.6.1 run")
+    if any(parameters.get(key) != value for key, value in expected_parameters.items()):
+        raise ValueError("Frozen baseline training parameters do not match")
+    evaluation_seeds = _baseline_evaluation_seeds(summary, evaluation)
+    if evaluation_seeds != tuple(DEFAULT_EVALUATION_SEEDS):
+        raise ValueError("Frozen baseline evaluation seed list does not match exactly")
+    if len(history) != epochs or history[-1] != summary.get("final_training_losses"):
+        raise ValueError("Frozen baseline history is inconsistent with the summary")
+    if len(history_csv) != epochs or any(
+        int(row["epoch"]) != int(item["epoch"])
+        or float(row["loss"]) != float(item["loss"])
+        for row, item in zip(history_csv, history)
+    ):
+        raise ValueError("Frozen baseline CSV and JSON histories are inconsistent")
+    if evaluation.get("metrics") != summary.get("evaluation", {}).get("metrics"):
+        raise ValueError("Frozen baseline evaluation metrics are inconsistent")
+    if evaluation.get("reloaded_final_checkpoint_metrics") != evaluation.get("metrics"):
+        raise ValueError("Frozen baseline reloaded metrics are inconsistent")
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if (
+        payload.get("completed_epochs") != epochs
+        or payload.get("training_history") != history
+        or payload.get("evaluation_metrics") != evaluation.get("metrics")
+        or not isinstance(payload.get("model_state_dict"), dict)
+        or (
+            payload.get("training_parameters") is not None
+            and payload.get("training_parameters") != parameters
+        )
+    ):
+        raise ValueError("Frozen baseline final checkpoint is inconsistent")
+    digest = checkpoint_sha256(checkpoint)
+    recorded_digest = summary.get("final_checkpoint_sha256") or summary.get(
+        "checkpoint_sha256"
+    )
+    if recorded_digest is not None and recorded_digest != digest:
+        raise ValueError("Frozen baseline checkpoint hash does not match")
+    return {
+        "checkpoint_sha256": digest,
+        "evaluation_seeds": list(evaluation_seeds),
+        "git_commit": summary.get("git_commit"),
+        "training_parameters": parameters,
+    }
+
+
 def baseline_run_is_compatible(path, seed, samples, batch_size, epochs):
     try:
-        summary = json.loads((path / "run_summary.json").read_text(encoding="utf-8"))
-        parameters = summary["training_parameters"]
-        evaluation = json.loads((path / "evaluation_metrics.json").read_text(encoding="utf-8"))
-        checkpoint = path / "pixelworld_0_6_1_final.pt"
-        return (
-            summary["status"] == "completed"
-            and summary["version"] == "0.6.1"
-            and parameters["seed"] == seed
-            and parameters["training_samples"] == samples
-            and parameters["batch_size"] == batch_size
-            and parameters["epochs"] == epochs
-            and parameters["learning_rate"] == 5e-4
-            and parameters["optimizer"] == "AdamW"
-            and evaluation["evaluation_seed_count"] == 30
-            and checkpoint.is_file()
-        )
-    except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        baseline_run_metadata(path, seed, samples, batch_size, epochs)
+        return True
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
 
@@ -606,8 +774,19 @@ def diagnose_baseline(model, device, training_seed, eval_seeds=DEFAULT_EVALUATIO
     }
 
 
-def baseline_record(repository_root, seed, device):
+def baseline_record(
+    repository_root,
+    seed,
+    device,
+    samples=14_000,
+    batch_size=128,
+    epochs=45,
+    metadata=None,
+):
     path = baseline_run_path(repository_root, seed)
+    metadata = metadata or baseline_run_metadata(
+        path, seed, samples, batch_size, epochs
+    )
     evaluation = json.loads((path / "evaluation_metrics.json").read_text(encoding="utf-8"))
     summary = json.loads((path / "run_summary.json").read_text(encoding="utf-8"))
     model, _ = load_baseline_model(path / "pixelworld_0_6_1_final.pt", device)
@@ -622,22 +801,24 @@ def baseline_record(repository_root, seed, device):
         "runtime_seconds": summary["timings"]["total_seconds"],
         "metrics": evaluation["metrics"],
         "diagnostics": diagnostics,
+        "provenance": metadata,
     }
 
 
-def load_v062_record(repository_root, run_id):
+def load_v062_record(repository_root, run_id, reused=False):
     store = PlacementRunStore.open(repository_root, run_id)
-    summary = json.loads((store.path / "run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads(store.artifact_path("run_summary.json").read_text(encoding="utf-8"))
     return {
         "version": "0.6.2",
         "variant": summary["config"]["variant"],
         "seed": summary["config"]["seed"],
         "run_id": run_id,
         "run_path": str(store.path),
-        "reused": False,
+        "reused": reused,
         "runtime_seconds": summary["timings"]["total_seconds"],
         "metrics": summary["metrics"],
         "diagnostics": summary["diagnostics"],
+        "provenance": summary["provenance"],
     }
 
 
@@ -645,20 +826,66 @@ def run_subprocess(arguments, repository_root):
     subprocess.run([sys.executable, "-m", "pixelworld.cli", *arguments], cwd=repository_root, check=True)
 
 
-def ensure_v062_run(repository_root, config, device):
+def _validate_v062_checkpoint(path, config, expected_commit, target_digest):
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    provenance = payload.get("provenance", {})
+    if (
+        payload.get("config") != config.to_dict()
+        or payload.get("variant") != config.variant
+        or payload.get("shared_target_sha256") != target_digest
+        or payload.get("evaluation_seeds") != list(config.evaluation_seeds)
+        or provenance.get("git_commit") != expected_commit
+        or provenance.get("git_dirty") is not False
+    ):
+        raise ValueError("Existing 0.6.2 checkpoint provenance is incompatible")
+    return payload
+
+
+def _validate_completed_v062_run(store, config, expected_commit, target_digest):
+    existing = PlacementRunStore.open(store.repository_root, store.run_id).config()
+    if existing.to_dict() != config.to_dict():
+        raise ValueError(f"Existing run {store.run_id!r} has an incompatible configuration")
+    summary = json.loads(store.artifact_path("run_summary.json").read_text(encoding="utf-8"))
+    provenance = summary.get("provenance", {})
+    if (
+        summary.get("status") != "completed"
+        or summary.get("config") != config.to_dict()
+        or summary.get("shared_target_sha256") != target_digest
+        or summary.get("evaluation_seeds") != list(config.evaluation_seeds)
+        or provenance.get("git_commit") != expected_commit
+        or provenance.get("git_dirty") is not False
+        or provenance.get("variant") != config.variant
+        or provenance.get("placement_config") != config.to_dict()
+    ):
+        raise ValueError(f"Existing run {store.run_id!r} has incompatible provenance")
+    checkpoint = store.artifact_path("final.pt")
+    _validate_v062_checkpoint(checkpoint, config, expected_commit, target_digest)
+    if checkpoint_sha256(checkpoint) != summary.get("checkpoint_sha256"):
+        raise ValueError(f"Existing run {store.run_id!r} has a checkpoint hash mismatch")
+
+
+def ensure_v062_run(repository_root, config, device, expected_commit, target_digest):
     run_id = (
         f"v062-{config.variant}-seed{config.seed}-n{config.samples}-"
         f"b{config.batch_size}-e{config.epochs}-r{config.offset_radius}"
     )
     store = PlacementRunStore(repository_root, run_id)
-    if (store.path / "run_summary.json").is_file():
+    require_study_commit(repository_root, expected_commit)
+    if store.artifact_path("run_summary.json").is_file():
+        _validate_completed_v062_run(store, config, expected_commit, target_digest)
+        return load_v062_record(repository_root, run_id, reused=True)
+    if store.artifact_path("config.json").is_file():
         existing = PlacementRunStore.open(repository_root, run_id).config()
         if existing.to_dict() != config.to_dict():
             raise ValueError(f"Existing run {run_id!r} has an incompatible configuration")
-        return load_v062_record(repository_root, run_id)
-    if (store.path / "config.json").is_file():
+        latest = store.artifact_path("latest.pt")
+        if not latest.is_file():
+            raise ValueError(f"Incomplete run {run_id!r} has no recovery checkpoint")
+        _validate_v062_checkpoint(latest, config, expected_commit, target_digest)
+        require_study_commit(repository_root, expected_commit)
         run_subprocess(["resume", "--run", run_id, "--device", device], repository_root)
     else:
+        require_study_commit(repository_root, expected_commit)
         run_subprocess(
             [
                 "train",
@@ -683,10 +910,12 @@ def ensure_v062_run(repository_root, config, device):
             ],
             repository_root,
         )
+    require_study_commit(repository_root, expected_commit)
+    _validate_completed_v062_run(store, config, expected_commit, target_digest)
     return load_v062_record(repository_root, run_id)
 
 
-def aggregate(records, root, offset_analysis, round_trip):
+def aggregate(records, root, offset_analysis, round_trip, study_provenance=None):
     flat_rows = []
     for record in records:
         row = {"variant": record["variant"], "seed": record["seed"]}
@@ -758,7 +987,14 @@ def aggregate(records, root, offset_analysis, round_trip):
                             "delta": float(row[metric]) - float(baseline[row["seed"]][metric]),
                         }
                     )
-    write_csv(root / "paired_deltas.csv", delta_rows)
+    comparison_note = (
+        "A versus B-E deltas are matched by training seed only; they are not paired "
+        "target-world deltas because A uses frozen 0.6.1 generator semantics while "
+        "B-E share the 0.6.2 eight-latent target worlds."
+    )
+    for row in delta_rows:
+        row["comparison_scope"] = "seed-matched benchmark; target worlds are not paired"
+    write_csv(root / "seed_matched_benchmark_deltas.csv", delta_rows)
 
     mean_lookup = {
         (row["variant"], row["metric"]): row["mean"] for row in statistics_rows
@@ -809,6 +1045,8 @@ def aggregate(records, root, offset_analysis, round_trip):
         "acceptance": acceptance,
         "recommended_variant": recommendation,
         "recommendation_reason": reason,
+        "comparison_scope": comparison_note,
+        "provenance": study_provenance,
     }
     atomic_json(root / "study_summary.json", summary)
     (root / "recommendation.md").write_text(
@@ -832,16 +1070,34 @@ def run_study(
     epochs=45,
     device="cuda",
 ):
+    repository_root = Path(repository_root).resolve()
+    initial_git = require_clean_study_repository(repository_root)
+    initial_commit = initial_git["git_commit"]
+    selected_device = resolve_device(device)
+    parameter_counts = {
+        variant: sum(parameter.numel() for parameter in create_model(variant).parameters())
+        for variant in variants
+    }
+    study_provenance = environment_provenance(repository_root, selected_device, 0)
+    study_provenance["model_parameters"] = parameter_counts
+    study_provenance.update(
+        {
+            "pixelworld_version": "0.6.2",
+            "variants": list(variants),
+            "shared_target_sha256": SHARED_TARGET_SHA256,
+            "evaluation_seeds": list(DEFAULT_EVALUATION_SEEDS),
+        }
+    )
     root = study_root(repository_root)
     root.mkdir(parents=True, exist_ok=True)
     offset_analysis_path = root / "offset_analysis.json"
     offset_analysis = None
     if offset_analysis_path.is_file() and samples == 14_000:
-        candidate = json.loads(offset_analysis_path.read_text(encoding="utf-8"))
-        if candidate.get("analysis_kind") == "explicit_eight_latent_region_relative_anchors":
-            offset_analysis = candidate
+        offset_analysis = load_analysis_cache(offset_analysis_path, samples)
     if offset_analysis is None:
         offset_analysis = analyze_latent_structure(samples)
+        if samples == 14_000 and not analysis_cache_is_compatible(offset_analysis, samples):
+            raise RuntimeError("Recomputed 0.6.2 analysis metadata or digest is invalid")
         atomic_json(offset_analysis_path, offset_analysis)
     radius = 8
     round_trip = validate_round_trip(1000 if samples == 14_000 else min(100, samples), radius)
@@ -861,6 +1117,35 @@ def run_study(
         "evaluation_seeds": list(DEFAULT_EVALUATION_SEEDS),
         "offset_radius": radius,
         "sequential_gpu_processes": True,
+        "shared_target_sha256": SHARED_TARGET_SHA256,
+        "provenance": study_provenance,
+        "placement_configs": [
+            PlacementConfig(
+                variant=variant,
+                seed=seed,
+                samples=samples,
+                batch_size=batch_size,
+                epochs=epochs,
+                offset_radius=radius,
+            ).validate().to_dict()
+            for variant in variants
+            if variant != "A"
+            for seed in seeds
+        ],
+        "variant_a_frozen_baseline": {
+            "version": "0.6.1",
+            "training_seeds": list(seeds) if "A" in variants else [],
+            "samples": samples,
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "learning_rate": 5e-4,
+            "optimizer": "AdamW",
+            "evaluation_seeds": list(DEFAULT_EVALUATION_SEEDS),
+        },
+        "comparison_scope": (
+            "A versus B-E is matched by training seed, not by target world; "
+            "only B-E share generated target worlds."
+        ),
     }
     atomic_json(root / "study_config.json", study_config)
     records = []
@@ -868,13 +1153,26 @@ def run_study(
         if variant not in VARIANTS:
             raise ValueError(f"Unknown placement variant: {variant!r}")
         for seed in seeds:
+            require_study_commit(repository_root, initial_commit)
             if variant == "A":
                 path = baseline_run_path(repository_root, seed)
-                if not baseline_run_is_compatible(path, seed, samples, batch_size, epochs):
+                try:
+                    baseline_metadata = baseline_run_metadata(
+                        path, seed, samples, batch_size, epochs
+                    )
+                except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
                     raise RuntimeError(
                         f"No compatible frozen Variant-A run for seed {seed}; run 0.6.1 separately"
-                    )
-                record = baseline_record(repository_root, seed, device)
+                    ) from error
+                record = baseline_record(
+                    repository_root,
+                    seed,
+                    selected_device,
+                    samples,
+                    batch_size,
+                    epochs,
+                    baseline_metadata,
+                )
             else:
                 config = PlacementConfig(
                     variant=variant,
@@ -884,7 +1182,13 @@ def run_study(
                     epochs=epochs,
                     offset_radius=radius,
                 ).validate()
-                record = ensure_v062_run(repository_root, config, device)
+                record = ensure_v062_run(
+                    repository_root,
+                    config,
+                    str(selected_device),
+                    initial_commit,
+                    SHARED_TARGET_SHA256,
+                )
             records.append(record)
             write_csv(
                 root / "runs.csv",
@@ -900,4 +1204,5 @@ def run_study(
                     for item in records
                 ],
             )
-    return aggregate(records, root, offset_analysis, round_trip)
+    require_study_commit(repository_root, initial_commit)
+    return aggregate(records, root, offset_analysis, round_trip, study_provenance)

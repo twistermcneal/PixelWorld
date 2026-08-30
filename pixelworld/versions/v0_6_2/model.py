@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+from pixelworld.config import COORD_CLASSES
 from pixelworld.model import LandscapeNet
 
 from .config import CONDITION_DIM, OFFSET_VARIANTS, VARIANTS
@@ -22,7 +23,7 @@ class LandscapeNet062(LandscapeNet):
         attributes = self.slots_for(self.attribute_encoder(x), self.attribute_decoder)
         offset_input = placement.detach() if self.variant in ("C", "E") else placement
         outputs = (
-            self.terrain_numeric(terrain).reshape(-1, 5, 65),
+            self.terrain_numeric(terrain).reshape(-1, 5, COORD_CLASSES),
             self.orientation_head(terrain),
             self.biome_head(terrain),
             self.region_head(placement),

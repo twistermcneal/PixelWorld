@@ -43,3 +43,30 @@ So werden Lernfehler und geometrisch notwendige Projektion nicht vermischt.
 
 Vollständige Mehrseed-Trainingsläufe dürfen erst nach bestandener struktureller
 Vorprüfung gestartet werden.
+
+## Reproduzierbarkeit und Artefaktsicherheit
+
+Der Study-Runner startet nur aus einem sauberen Git-Arbeitsbaum. Commit und
+Dirty-Status werden vor jedem Trainingsprozess und vor jeder Wiederverwendung
+erneut kontrolliert. Run-Summaries, Recovery- und finale Checkpoints sowie die
+Studienkonfiguration speichern Commit, Branch, Python-, PyTorch- und
+CUDA-Informationen, Device/GPU, Modellparameterzahl, vollständige Konfiguration,
+Evaluationsseeds und den gemeinsamen B–E-Target-Digest.
+
+Der kanonische Digest der 14.000 B–E-Zielwelten lautet:
+
+`a04645d1b56d45b4916e496bee83cbb2837da726184fa7a4a2f269046434c5ae`
+
+Analyse-Caches werden nur bei exakter Übereinstimmung von Schema,
+Generator-/Target-Version, Dimensionskonstanten, Radius, Samplezahl und Digest
+wiederverwendet. Run-Verzeichnisse und jede einzelne Artefaktdatei werden vor
+dem Zugriff erneut kanonisch aufgelöst; Symlink-, Junction-, Gerätenamen- und
+Traversal-Escapes werden abgewiesen.
+
+## Bedeutung des Baseline-Vergleichs
+
+Variante A verwendet die eingefrorene 0.6.1-Generatorsemantik. B–E teilen die
+neuen 8-Latent-Zielwelten. Die Datei
+`seed_matched_benchmark_deltas.csv` vergleicht A und B–E daher nur nach gleichem
+Trainingsseed. Sie enthält keine gepaarten Target-Welt-Differenzen. Statistisch
+gemeinsam erzeugte Target-Welten dürfen ausschließlich für B–E behauptet werden.

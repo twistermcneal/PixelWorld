@@ -75,23 +75,32 @@ def resolve_output_subdirectory(repository_root: Path, requested_path: str | Pat
 
 def atomic_json(path: Path, data: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
+    _validate_atomic_paths(path, temporary)
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
 
 def atomic_torch_save(path: Path, data: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
+    _validate_atomic_paths(path, temporary)
     torch.save(data, temporary)
     os.replace(temporary, path)
 
 
 def atomic_history_csv(path: Path, history: list[dict[str, Any]]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
+    _validate_atomic_paths(path, temporary)
     with temporary.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=HISTORY_FIELDS)
         writer.writeheader()
         writer.writerows(history)
     os.replace(temporary, path)
+
+
+def _validate_atomic_paths(path: Path, temporary: Path) -> None:
+    canonical_parent = path.parent.resolve()
+    if path.resolve().parent != canonical_parent or temporary.resolve().parent != canonical_parent:
+        raise ValueError("Atomic artifact path escapes its configured directory")
 
 
 def checkpoint_sha256(path: Path) -> str:
@@ -109,6 +118,83 @@ def git_commit(root: Path) -> str:
         ).strip()
     except (OSError, subprocess.SubprocessError):
         return "unknown"
+
+
+def git_provenance(root: Path) -> dict[str, Any]:
+    root = Path(root).resolve()
+    commit = git_commit(root)
+    try:
+        porcelain = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        branch = subprocess.check_output(
+            ["git", "branch", "--show-current"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip() or None
+        dirty = bool(porcelain.strip())
+    except (OSError, subprocess.SubprocessError):
+        branch = None
+        dirty = None
+    return {"git_commit": commit, "git_dirty": dirty, "git_branch": branch}
+
+
+def environment_provenance(root: Path, device, model_parameters: int) -> dict[str, Any]:
+    device_object = torch.device(device)
+    document = {
+        **git_provenance(root),
+        "python_version": sys.version,
+        "torch_version": str(torch.__version__),
+        "cuda_runtime": torch.version.cuda,
+        "cuda_available": torch.cuda.is_available(),
+        "device": str(device_object),
+        "gpu_model": (
+            torch.cuda.get_device_name(device_object)
+            if device_object.type == "cuda"
+            else None
+        ),
+        "model_parameters": int(model_parameters),
+    }
+    if device_object.type == "cuda":
+        properties = torch.cuda.get_device_properties(device_object)
+        document.update(
+            {
+                "gpu_compute_capability": [properties.major, properties.minor],
+                "gpu_total_vram_bytes": properties.total_memory,
+            }
+        )
+    return document
+
+
+def resolve_contained_run_path(runs_root: Path, run_id: str) -> tuple[Path, Path]:
+    """Resolve a validated run ID without permitting symlink or junction escapes."""
+    validate_run_id(run_id)
+    logical_root = Path(runs_root).absolute()
+    canonical_parent = logical_root.parent.resolve()
+    canonical_root = logical_root.resolve()
+    if canonical_root.parent != canonical_parent:
+        raise ValueError("Runs directory escapes its configured study directory")
+    candidate = (canonical_root / run_id).resolve()
+    if candidate.parent != canonical_root:
+        raise ValueError("Run path escapes its configured runs directory")
+    return canonical_root, candidate
+
+
+def resolve_run_artifact(runs_root: Path, run_id: str, filename: str) -> Path:
+    """Revalidate the run directory and one direct artifact immediately before I/O."""
+    if not filename or Path(filename).name != filename:
+        raise ValueError(f"Invalid run artifact name: {filename!r}")
+    canonical_root, run_path = resolve_contained_run_path(runs_root, run_id)
+    if run_path.parent != canonical_root:
+        raise ValueError("Run path escapes its configured runs directory")
+    artifact = (run_path / filename).resolve()
+    if artifact.parent != run_path:
+        raise ValueError("Run artifact path escapes its run directory")
+    return artifact
 
 
 def capture_rng_state() -> dict[str, Any]:
@@ -209,15 +295,11 @@ class RunStore:
 
     def environment(self, device, model_parameters: int) -> dict[str, Any]:
         device_object = torch.device(device)
-        environment = {
-            "git_commit": git_commit(self.repository_root),
-            "python_version": sys.version,
-            "torch_version": str(torch.__version__),
-            "cuda_version": torch.version.cuda,
-            "device": str(device_object),
-            "gpu": torch.cuda.get_device_name(0) if device_object.type == "cuda" else None,
-            "model_parameters": model_parameters,
-        }
+        environment = environment_provenance(
+            self.repository_root, device_object, model_parameters
+        )
+        environment["cuda_version"] = environment["cuda_runtime"]
+        environment["gpu"] = environment["gpu_model"]
         if device_object.type == "cuda":
             properties = torch.cuda.get_device_properties(device_object)
             environment.update(
