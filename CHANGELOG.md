@@ -21,6 +21,7 @@
 - getrennte Terrain-, Geometry-, Presence- und Attribute Encoder
 - 12.000 Trainingslandschaften und 45 Epochen
 - 5.000 Generatorwelten ohne Objektüberlappung oder Wasserplatzierung validiert
+- vollständigen 45-Epochen-Referenzlauf, Endmetriken und Visualisierung archiviert
 
 ## 0.5.2
 

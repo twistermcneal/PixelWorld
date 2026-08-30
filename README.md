@@ -34,6 +34,8 @@ Der Terrain Graph beschreibt Biome, Küstenrichtung, Uferlinie, Strandbreite, Fe
 
 Der 0.6-Referenzlauf bestätigt den Terrain Graph. 0.6.1 ersetzt die schwache absolute Positionsvorhersage durch `Terrainregion + Anchor` und führt deterministische Vegetation ein.
 
+Der vollständige Benchmark mit Trainingskurve und Visualisierung liegt unter [`results/0.6`](results/0.6/README.md).
+
 ## Schnellstart
 
 Voraussetzung ist Python 3.10 oder neuer. Eine CUDA-fähige PyTorch-Installation beschleunigt das Training, ist aber nicht zwingend erforderlich.
