@@ -111,13 +111,17 @@ def scatter_vegetation(terrain,regions,params,seed):
     return vegetation
 
 def anchor_candidates(regions,terrain,region_id,w,h,seed,slot):
-    candidates=[]
-    for y in range(0,SIZE-h+1,2):
-        for x in range(0,SIZE-w+1,2):
-            patch=regions[y:y+h,x:x+w]
-            if np.mean(patch==region_id)>=.70 and np.all(terrain[y:y+h,x:x+w]!=TERRAINS['water']):
-                key=world_seed(f'{seed}:{slot}:{region_id}:{x}:{y}'); candidates.append((key,x,y))
-    candidates.sort(); return [(x,y) for _,x,y in candidates]
+    # Integralbilder prüfen alle Rechtecke vektorisiert statt in Python-Schleifen.
+    def window_sum(mask):
+        integral=np.pad(mask.astype(np.int32),((1,0),(1,0))).cumsum(0).cumsum(1)
+        return integral[h:,w:]-integral[:-h,w:]-integral[h:,:-w]+integral[:-h,:-w]
+    region_pixels=window_sum(regions==region_id); land_pixels=window_sum(terrain!=TERRAINS['water'])
+    valid=(region_pixels>=int(np.ceil(.70*w*h)))&(land_pixels==w*h)
+    valid[1::2,:]=False; valid[:,1::2]=False
+    ys,xs=np.where(valid)
+    if len(xs)==0: return []
+    rng=np.random.default_rng(world_seed(f'anchors:{seed}:{slot}:{region_id}:{w}:{h}'))
+    order=rng.permutation(len(xs)); return [(int(xs[i]),int(ys[i])) for i in order]
 
 def resolve_anchor(regions,terrain,region_id,anchor_id,w,h,seed,slot,occupied):
     for fallback in [region_id,REGIONS.index('open_land'),REGIONS.index('beach'),REGIONS.index('forest'),REGIONS.index('rock_field')]:
@@ -170,6 +174,9 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset,DataLoader
 
 torch.manual_seed(SEED); DEVICE='cuda' if torch.cuda.is_available() else 'cpu'; COORD_CLASSES=SIZE+1
+print('Device:',DEVICE)
+if DEVICE=='cuda':
+    print('GPU:',torch.cuda.get_device_name(0)); torch.set_float32_matmul_precision('high')
 
 def prompt_vector(prompt):
     p=prompt.lower(); v=np.zeros(len(BIOMES)+6,np.float32)
@@ -191,11 +198,18 @@ def scene_targets(w):
     return np.asarray([shore,width,rock,forest,density]),orientation,biome,regions,anchors,presence,classes,actions,triggers
 
 class LandscapeDataset(Dataset):
-    def __init__(self,n=14000): self.n=n
-    def __len__(self): return self.n
-    def __getitem__(self,i):
-        p=f'{BIOMES[i%4]} coast beach forest rock portal {i}'; seed=i+1000; targets=scene_targets(generate_landscape(p,seed))
-        return tuple(torch.tensor(x) for x in (condition_vector(p,seed),*targets))
+    def __init__(self,n=14000):
+        # Einmal erzeugen statt 14.000 Welten in jeder der 45 Epochen neu zu bauen.
+        self.samples=[]
+        print(f'Erzeuge {n:,} Trainingslandschaften einmalig ...')
+        for i in range(n):
+            p=f'{BIOMES[i%4]} coast beach forest rock portal {i}'; seed=i+1000
+            targets=scene_targets(generate_landscape(p,seed))
+            self.samples.append(tuple(torch.tensor(x) for x in (condition_vector(p,seed),*targets)))
+            if (i+1)%2000==0: print(f'  {i+1:,}/{n:,}')
+        print('Datensatz bereit.')
+    def __len__(self): return len(self.samples)
+    def __getitem__(self,i): return self.samples[i]
 
 class LandscapeNet(nn.Module):
     def __init__(self,condition_dim=len(BIOMES)+6+LAYOUT_DIM,hidden=320):
@@ -218,7 +232,9 @@ class LandscapeNet(nn.Module):
 model=LandscapeNet().to(DEVICE); sum(p.numel() for p in model.parameters())
 """)
 
-set_cell(7, """loader=DataLoader(LandscapeDataset(14000),batch_size=128,shuffle=True); optimizer=torch.optim.AdamW(model.parameters(),lr=5e-4)
+set_cell(7, """dataset=LandscapeDataset(14000)
+loader=DataLoader(dataset,batch_size=128,shuffle=True,num_workers=2,pin_memory=(DEVICE=='cuda'),persistent_workers=True)
+optimizer=torch.optim.AdamW(model.parameters(),lr=5e-4)
 coord_values=torch.arange(COORD_CLASSES,dtype=torch.float32,device=DEVICE); ce=nn.CrossEntropyLoss(reduction='none'); bce=nn.BCEWithLogitsLoss(reduction='none')
 
 def ordinal_loss(logits,target,sigma=1.):
@@ -233,7 +249,7 @@ EPOCHS=45
 for epoch in range(EPOCHS):
     model.train(); totals=np.zeros(8); batches=0
     for batch in loader:
-        condition,numeric,orient,biome,regions,anchors,pres,cls,act,trig=[x.to(DEVICE) for x in batch]
+        condition,numeric,orient,biome,regions,anchors,pres,cls,act,trig=[x.to(DEVICE,non_blocking=True) for x in batch]
         num_l,orient_l,biome_l,region_l,anchor_l,pres_l,cls_l,act_l,trig_l=model(condition)
         terrain_loss=ordinal_loss(num_l,numeric).mean()+ce(orient_l,orient).mean()+ce(biome_l,biome).mean()
         placement_loss=masked_ce(region_l,regions,pres)+masked_ce(anchor_l,anchors,pres)

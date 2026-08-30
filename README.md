@@ -51,6 +51,8 @@ Danach [`notebooks/PixelWorld_0_6_1.ipynb`](notebooks/PixelWorld_0_6_1.ipynb) ö
 
 Das 0.6.1-Referenzexperiment verwendet 14.000 synthetische Landschaften, Batchgröße 128 und 45 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
 
+Beim Start werden die Landschaften einmalig auf der CPU vorberechnet. Anschließend trainiert das Modell automatisch auf CUDA, sofern `torch.cuda.is_available()` wahr ist. Das Notebook gibt das erkannte Gerät und den GPU-Namen aus.
+
 ## Architektur
 
 ```text

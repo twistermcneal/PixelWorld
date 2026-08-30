@@ -41,6 +41,8 @@ Die Größen sind weiterhin an die Klasse gebunden:
 
 Terrain, Placement, Presence und Attribute besitzen eigene Encoder. Die absolute Pixelposition ist kein Lernziel mehr, sondern wird deterministisch aus Region, Anchor, Klasse und belegten Flächen aufgelöst.
 
+Die gültigen Anchorflächen werden mit Integralbildern vektorisiert ermittelt. Der Trainingsdatensatz wird einmalig erzeugt und im Speicher gehalten; dadurch bleibt die GPU während der Epochen nicht von wiederholter prozeduraler Weltgenerierung abhängig.
+
 ## Maps
 
 - **Terrain Map:** Geländeklasse jedes Pixels

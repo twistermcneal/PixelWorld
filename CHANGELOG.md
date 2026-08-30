@@ -10,6 +10,9 @@
 - eigener Placement Encoder für Region und Anchor
 - 14.000 Trainingslandschaften und 45 Epochen
 - 1.000 Generatorwelten und 200 pixelgenaue Landmark-Round-trips validiert
+- Anchor-Suche durch vektorisierte Integralbilder beschleunigt
+- 14.000 Trainingslandschaften werden einmalig vorberechnet statt in jeder Epoche neu erzeugt
+- CUDA-Gerät, GPU-Name, gepinnter Speicher und asynchrone Batch-Transfers ergänzt
 
 ## 0.6 – Meilenstein 3
 
