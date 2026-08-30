@@ -43,17 +43,50 @@ Presence und Attribute besitzen eigene Encoder. Dadurch konkurrieren weder Anwes
 
 ## Maps
 
+- **Terrain Map:** Geländeklasse jedes Pixels
 - **Semantic Map:** semantische Klasse jedes Pixels
 - **Object Map:** eindeutige Slot-ID jedes Objektpixels
+- **Walkability Map:** begehbare und blockierte Terrainpixel
 - **Interaction Map:** interaktive Pixelmaske
 
 Beim Anklicken eines Pixels löst die Object Map zunächst die Slot-ID auf. Aktion und Trigger bestimmen die Reaktion. Die Folgewelt-ID entsteht deterministisch aus Welt-Seed, Slot-ID, Trigger-Typ und Story-State.
 
-## Bewertung des Referenzlaufs
+## Verschachtelte Weltarchitektur
 
-Die Geometry- und Presence-Pfade übertragen sich stabil auf acht variable Slots. Klassen, Aktionen und Trigger werden überwiegend richtig erkannt, sind aber noch deutlich von vollständiger Zuverlässigkeit entfernt. Kleine Klassen verlieren bei einer falschen Klasse oder einem Pixel Versatz überproportional IoU.
+Städte und Dörfer werden nicht als einzelne Object Slots modelliert. Sie bilden eine eigene Ebene zwischen Terrain und Gebäuden:
 
-Der Seed-Token-Kopf aus 0.5 ist entfernt. Ein ordinal vorhergesagter Identitätswert war semantisch fragwürdig: Benachbarte Token sind nicht automatisch ähnliche Folgewelten. Seit 0.5.1 werden Übergänge deterministisch berechnet. 0.5.2 trennt zusätzlich den Attribute Encoder vom Geometry Encoder.
+```text
+World Scene Graph
+├─ Terrain Layer
+│  ├─ Biom, Wasser, Strand und Land
+│  └─ Vegetations- und Felsregionen
+├─ Settlement Layer
+│  ├─ Dorf, Stadt, Hafen oder Ruine
+│  └─ Zentrum, Größe, Dichte und Stil
+├─ District Layer
+│  ├─ Wohnen, Markt, Hafen und Industrie
+│  └─ Straßennetz und Grundstücke
+├─ Building Layer
+│  ├─ Gebäudeart, Eingang und Funktion
+│  └─ Außenform und Kollisionsmaske
+└─ Interior Layer
+   ├─ Raumstruktur und Türen
+   └─ NPCs, Gegenstände und Portale
+```
+
+Jede Ebene besitzt einen eigenen Scene Graph und Renderer. Dadurch muss das Modell nicht jedes Haus, jeden Baum oder jeden Straßenpixel einzeln vorhersagen.
+
+## Deterministische Hierarchie
+
+Übergänge zwischen den Ebenen werden aus stabilen Identitäten abgeleitet:
+
+```text
+Welt-Seed + Settlement-ID + Story-State → Siedlungs-Seed
+Siedlungs-Seed + Gebäude-ID             → Innenraum-Seed
+Innenraum-Seed + Object-ID              → Folgewelt-Seed
+```
+
+Ein Dorf bleibt dadurch bei jedem Besuch dasselbe Dorf. Story-State kann kontrolliert Veränderungen wie zerstörte Gebäude, neue Bewohner oder gesperrte Wege einbringen.
 
 ## Aktuelle Grenzen
 
@@ -61,8 +94,9 @@ Der Seed-Token-Kopf aus 0.5 ist entfernt. Ein ordinal vorhergesagter Identitäts
 - maximal acht Objekte
 - feste Objektgrößen und rechteckige Masken
 - synthetischer Datengenerator statt kuratierter Editor-Daten
+- noch keine Settlement-, District- oder Building-Layer
 - noch keine Beziehungen, Animationen oder persistenter World State
 
 ## Nächste Architekturarbeit
 
-Nach der Validierung verzweigter Story-States folgt permutation-invariantes Matching. Animationen werden später als Zustand des Scene Graphs modelliert; der Renderer wählt wiederverwendbare Sprite-Frames und aktualisiert parallel die Logik-Maps.
+0.6.1 führt terrainrelative Objektpositionen und deterministische Vegetation ein. Ab 0.7 folgen Dörfer und Städte als Settlement Layer. Die detaillierte Reihenfolge steht in [`roadmap.md`](roadmap.md).

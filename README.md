@@ -45,7 +45,7 @@ jupyter lab
 
 Danach [`notebooks/PixelWorld_0_6.ipynb`](notebooks/PixelWorld_0_6.ipynb) öffnen und die Zellen der Reihe nach ausführen. Die Notebooks der 0.5-Reihe bleiben als Vergleiche erhalten.
 
-Das Referenzexperiment verwendet 10.000 synthetische Welten, Batchgröße 128 und 40 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
+Das 0.6-Referenzexperiment verwendet 12.000 synthetische Landschaften, Batchgröße 128 und 45 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
 
 ## Architektur
 
@@ -71,21 +71,21 @@ Weitere Details stehen in [`docs/architecture.md`](docs/architecture.md), die En
 - Weltgröße: `64 × 64` Pixel
 - maximale Slotzahl: `8`
 - ordinale Koordinatenklassifikation über 65 Pixelklassen
-- Objektpositionen relativ zum vorhergesagten Raum
+- in 0.6 noch absolute Objektpositionen; terrainrelative Positionen folgen in 0.6.1
 - aktuell feste Objektgrößen pro Klasse
 
 Das Notebook enthält Generator, Targets, Modell, Training, Auswertung, Visualisierung und einen interaktiven Pixel-zu-Folgewelt-Prototyp in einer Datei.
 
 ## Roadmap
 
-- 0.6-Terrainmetriken und Object Slots auswerten
-- deterministische Vegetation und Wälder als Scatter-Layer
-- permutation-invariantes Slot-Matching
-- freie Pixelmasken und Sprite-IDs
-- Beziehungen wie `on`, `inside`, `locked_by` und `leads_to`
-- Editor als kuratierte Datenquelle
-- Titelbildschirme, Animation States und Pixel-Art-Renderer
-- Story-Constraints und dauerhafter World State
+- **0.6:** Landschaft und Terrain
+- **0.6.1:** terrainrelative Positionen, Vegetation und Wälder
+- **0.7:** Settlement Layer für Dörfer
+- **0.7.1:** Straßen, Grundstücke und Gebäude
+- **0.7.2:** Stadtbezirke und größere Städte
+- **0.8:** Übergänge Landschaft → Stadt → Gebäude → Innenraum
+
+Die vollständige Planung steht in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Lizenz
 
