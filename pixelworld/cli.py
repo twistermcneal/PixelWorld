@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .artifacts import RunStore, atomic_json, list_runs
@@ -12,6 +13,14 @@ from .training import resolve_device, run_training
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def print_device(device):
+    import torch
+
+    print(f"Device: {device}", flush=True)
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(device)}", flush=True)
 
 
 def build_parser():
@@ -74,12 +83,19 @@ def command_evaluate(args):
     store = RunStore.open(REPOSITORY_ROOT, args.run)
     config = store.config()
     device = resolve_device(args.device)
+    print_device(device)
     checkpoint = store.checkpoint_path(final=True)
     if not checkpoint.is_file():
         checkpoint = store.checkpoint_path(final=False)
     model, _ = load_model(checkpoint, device)
+    started = time.perf_counter()
     metrics = evaluate_model(model, device, eval_seeds=config.evaluation_seeds)
-    document = {"evaluation_seeds": list(config.evaluation_seeds), "metrics": metrics, "checkpoint_reloaded": True}
+    document = {
+        "evaluation_seeds": list(config.evaluation_seeds),
+        "metrics": metrics,
+        "evaluation_seconds": time.perf_counter() - started,
+        "checkpoint_reloaded": True,
+    }
     atomic_json(store.path / "evaluation_metrics.json", document)
     print(json.dumps(document, ensure_ascii=False, indent=2))
 
@@ -87,6 +103,7 @@ def command_evaluate(args):
 def command_infer(args):
     store = RunStore.open(REPOSITORY_ROOT, args.run)
     device = resolve_device(args.device)
+    print_device(device)
     checkpoint = store.checkpoint_path(final=True)
     if not checkpoint.is_file():
         checkpoint = store.checkpoint_path(final=False)

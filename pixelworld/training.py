@@ -256,6 +256,8 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
         history = []
         start_epoch = 0
         prior_training_seconds = 0.0
+        prior_total_seconds = 0.0
+        dataset_preparation_seconds = objects.dataset_preparation_seconds
         if resume:
             latest = store.checkpoint_path(final=False)
             if not latest.is_file():
@@ -266,6 +268,10 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             history = list(payload["training_history"])
             start_epoch = int(payload["completed_epochs"])
             prior_training_seconds = float(payload["timings"]["training_seconds"])
+            prior_total_seconds = float(payload["timings"]["total_seconds"])
+            dataset_preparation_seconds += float(
+                payload["timings"]["dataset_preparation_seconds"]
+            )
             restore_rng_state(payload["rng_state"])
             store.log(f"Resume after epoch {start_epoch}")
         training_started = time.perf_counter()
@@ -275,9 +281,9 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             history.append(record)
             training_seconds = prior_training_seconds + (time.perf_counter() - training_started)
             timings = {
-                "dataset_preparation_seconds": objects.dataset_preparation_seconds,
+                "dataset_preparation_seconds": dataset_preparation_seconds,
                 "training_seconds": training_seconds,
-                "total_seconds": time.perf_counter() - started,
+                "total_seconds": prior_total_seconds + (time.perf_counter() - started),
                 "epoch_seconds": [item["epoch_seconds"] for item in history],
             }
             store.write_checkpoint(
@@ -303,9 +309,9 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
                 }
             )
         timings = {
-            "dataset_preparation_seconds": objects.dataset_preparation_seconds,
+            "dataset_preparation_seconds": dataset_preparation_seconds,
             "training_seconds": training_seconds,
-            "total_seconds": time.perf_counter() - started,
+            "total_seconds": prior_total_seconds + (time.perf_counter() - started),
             "epoch_seconds": [item["epoch_seconds"] for item in history],
         }
         final_payload = _checkpoint_payload(
@@ -341,7 +347,7 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             {
                 "evaluation_seconds": evaluation_seconds,
                 "single_inference_seconds": inference_seconds,
-                "total_seconds": time.perf_counter() - started,
+                "total_seconds": prior_total_seconds + (time.perf_counter() - started),
             }
         )
         store.write_checkpoint(final_payload, final=True)
