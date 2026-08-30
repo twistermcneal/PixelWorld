@@ -233,7 +233,9 @@ model=LandscapeNet().to(DEVICE); sum(p.numel() for p in model.parameters())
 """)
 
 set_cell(7, """dataset=LandscapeDataset(14000)
-loader=DataLoader(dataset,batch_size=128,shuffle=True,num_workers=2,pin_memory=(DEVICE=='cuda'),persistent_workers=True)
+# Die Samples liegen bereits im Speicher. num_workers=0 vermeidet Colab-Hänger
+# durch das Kopieren/Serialisieren der vollständigen vorberechneten Sample-Liste.
+loader=DataLoader(dataset,batch_size=128,shuffle=True,num_workers=0,pin_memory=(DEVICE=='cuda'))
 optimizer=torch.optim.AdamW(model.parameters(),lr=5e-4)
 coord_values=torch.arange(COORD_CLASSES,dtype=torch.float32,device=DEVICE); ce=nn.CrossEntropyLoss(reduction='none'); bce=nn.BCEWithLogitsLoss(reduction='none')
 
