@@ -1,39 +1,39 @@
-# Architektur von PixelWorld 0.5.2
+# Architektur von PixelWorld 0.6
 
 ## Ziel
 
 PixelWorld trennt die Erzeugung einer Welt in zwei Ebenen:
 
-1. Ein lernendes Modell erzeugt einen strukturierten Scene Graph.
+1. Ein lernendes Modell erzeugt einen Terrain- und Object Scene Graph.
 2. Ein deterministischer Rasterizer übersetzt diesen Graphen in Pixel- und Logik-Maps.
 
 So bleiben Darstellung, Interaktion und Übergänge synchron. Das Modell muss keine fertigen Bilder halluzinieren und die Spiellogik muss Objekte nicht nachträglich aus Pixeln rekonstruieren.
 
 ## Repräsentation
 
-Eine Welt besteht aus einem rechteckigen Raum und maximal acht kanonisch geordneten Slots. Jeder Slot trägt Presence, Klasse, relative Position, Aktion und Trigger.
+Eine Außenwelt besteht aus einem parametrischen Terrain Graph und maximal acht kanonisch geordneten Slots. Jeder Slot trägt Presence, Klasse, Position, Aktion und Trigger.
 
-Die absolute Objektposition wird berechnet als:
+Der Terrain Graph enthält:
 
 ```text
-absolute Position = Raumursprung + relative Slotposition
+Biom + Küstenrichtung + Uferlinie + Strandbreite + Felsigkeit
 ```
 
-Die Größen sind in 0.5 noch an die Klasse gebunden:
+Die Größen sind weiterhin an die Klasse gebunden:
 
 | Klasse | Breite | Höhe |
 |---|---:|---:|
-| `door` | 7 | 16 |
+| `tree` | 5 | 8 |
+| `rock` | 5 | 4 |
 | `npc` | 5 | 9 |
-| `object` | 4 | 5 |
 | `portal` | 6 | 8 |
 
 ## Modellköpfe
 
 | Kopf | Aufgabe | Ausgabe |
 |---|---|---|
-| Room | Raumgeometrie | vier ordinale Koordinaten |
-| Position | relative Slotposition | X/Y je Slot |
+| Terrain | Landschaftsstruktur | Parameter und Kategorien |
+| Position | absolute Slotposition | X/Y je Slot |
 | Presence | Slot vorhanden | binäres Logit je Slot |
 | Class | Objektart über Attribute Encoder | vier Klassen |
 | Action | mögliche Aktion über Attribute Encoder | drei Klassen |

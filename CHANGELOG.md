@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6 – Meilenstein 3
+
+- Terrain Graph mit Biom, Küstenrichtung, Uferlinie, Strandbreite und Felsigkeit
+- Terrainklassen Wasser, Sand, Gras, Erde, Fels und Schnee
+- deterministischer Rasterizer für organische Küstenlinien
+- Walkability-, Terrain-, Object- und Interaction-Maps
+- Außenwelt-Slots für Baum, Fels, NPC und Portal
+- getrennte Terrain-, Geometry-, Presence- und Attribute Encoder
+- 12.000 Trainingslandschaften und 45 Epochen
+- 5.000 Generatorwelten ohne Objektüberlappung oder Wasserplatzierung validiert
+
 ## 0.5.2
 
 - eigener Attribute Encoder für Klasse, Aktion und Trigger

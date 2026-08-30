@@ -4,17 +4,17 @@ PixelWorld erforscht einen generativen Weltbaukasten, der aus `Prompt + Seed` ei
 
 ## Aktueller Stand
 
-**Version 0.5.2 – separater Attribute Encoder**
+**Version 0.6 – Meilenstein 3: Landschaften und Terrain**
 
-Das Modell erzeugt einen Raum mit bis zu acht variablen Object Slots. Jeder vorhandene Slot enthält:
+Das Modell erzeugt strukturierte Außenwelten mit einem Terrain Graph und bis zu acht variablen Object Slots. Jeder vorhandene Slot enthält:
 
-- Objektklasse: `door`, `npc`, `object` oder `portal`
-- relative X/Y-Position im Raum
+- Objektklasse: `tree`, `rock`, `npc` oder `portal`
+- absolute X/Y-Position in der Landschaft
 - Aktion: `LOOK`, `USE` oder `SCAN`
 - Trigger: `NONE`, `WORLD`, `STORY` oder `SECRET`
 - deterministisch abgeleitete Folgewelt-ID
 
-Der Scene Graph wird deterministisch in Semantic-, Object- und Interaction-Maps gerastert. Ein Klick kann dadurch einem Objekt und dessen Folgewelt zugeordnet werden, ohne Logik aus dem Bild zurückraten zu müssen.
+Der Terrain Graph beschreibt Biome, Küstenrichtung, Uferlinie, Strandbreite und Felsigkeit. Der deterministische Rasterizer erzeugt daraus Terrain-, Semantic-, Object-, Walkability- und Interaction-Maps.
 
 ## Ergebnis des 0.5-Referenzlaufs
 
@@ -43,7 +43,7 @@ pip install -r requirements.txt
 jupyter lab
 ```
 
-Danach [`notebooks/PixelWorld_0_5_2.ipynb`](notebooks/PixelWorld_0_5_2.ipynb) öffnen und die Zellen der Reihe nach ausführen. Die Notebooks für [`0.5`](notebooks/PixelWorld_0_5.ipynb) und [`0.5.1`](notebooks/PixelWorld_0_5_1.ipynb) bleiben als Vergleiche erhalten.
+Danach [`notebooks/PixelWorld_0_6.ipynb`](notebooks/PixelWorld_0_6.ipynb) öffnen und die Zellen der Reihe nach ausführen. Die Notebooks der 0.5-Reihe bleiben als Vergleiche erhalten.
 
 Das Referenzexperiment verwendet 10.000 synthetische Welten, Batchgröße 128 und 40 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
 
@@ -51,7 +51,8 @@ Das Referenzexperiment verwendet 10.000 synthetische Welten, Batchgröße 128 un
 
 ```text
 Prompt + Seed
-├─ Geometry Encoder → Raum und relative Slotpositionen
+├─ Terrain Encoder → Biom, Küste, Strand und Felsigkeit
+├─ Geometry Encoder → absolute Slotpositionen
 ├─ Presence Encoder → vorhandene Slots
 └─ Attribute Encoder → Klasse, Aktion und Trigger
                        ↓
@@ -77,7 +78,8 @@ Das Notebook enthält Generator, Targets, Modell, Training, Auswertung, Visualis
 
 ## Roadmap
 
-- Attribute Accuracy des getrennten Encoders gegen 0.5.1 auswerten
+- 0.6-Terrainmetriken und Object Slots auswerten
+- deterministische Vegetation und Wälder als Scatter-Layer
 - permutation-invariantes Slot-Matching
 - freie Pixelmasken und Sprite-IDs
 - Beziehungen wie `on`, `inside`, `locked_by` und `leads_to`
