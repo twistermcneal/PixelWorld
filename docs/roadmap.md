@@ -20,10 +20,12 @@ Status: in Auswertung.
 
 ## 0.6.1 – Terrainregionen und Vegetation
 
+Status: implementiert, Training und Auswertung offen.
+
 - Positionen relativ zu Terrainregionen statt absoluter Pixelpositionen
 - Regionen `BEACH`, `FOREST`, `OPEN_LAND`, `ROCK` und `SNOW`
-- lokaler X/Y-Offset innerhalb einer Region
-- deterministischer Scatter-Layer für Bäume, Palmen, Büsche und Steine
+- 16 kanonische Anchors pro Landmark Slot
+- deterministischer Scatter-Layer für Bäume
 - Dichte, Art, Mindestabstand und Vegetations-Seed
 - Wege und freie Korridore von Vegetation ausnehmen
 

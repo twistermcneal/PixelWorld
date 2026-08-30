@@ -4,33 +4,35 @@ PixelWorld erforscht einen generativen Weltbaukasten, der aus `Prompt + Seed` ei
 
 ## Aktueller Stand
 
-**Version 0.6 – Meilenstein 3: Landschaften und Terrain**
+**Version 0.6.1 – Terrainregionen und Vegetation**
 
-Das Modell erzeugt strukturierte Außenwelten mit einem Terrain Graph und bis zu acht variablen Object Slots. Jeder vorhandene Slot enthält:
+Das Modell erzeugt strukturierte Außenwelten mit Terrain- und Region Graph sowie bis zu acht wichtigen Landmark Slots. Jeder vorhandene Slot enthält:
 
-- Objektklasse: `tree`, `rock`, `npc` oder `portal`
-- absolute X/Y-Position in der Landschaft
+- Objektklasse: `chest`, `npc`, `portal` oder `ruin`
+- Terrainregion: Strand, offenes Land, Felsfeld oder Wald
+- einen von 16 kanonischen Anchors innerhalb der Region
 - Aktion: `LOOK`, `USE` oder `SCAN`
 - Trigger: `NONE`, `WORLD`, `STORY` oder `SECRET`
 - deterministisch abgeleitete Folgewelt-ID
 
-Der Terrain Graph beschreibt Biome, Küstenrichtung, Uferlinie, Strandbreite und Felsigkeit. Der deterministische Rasterizer erzeugt daraus Terrain-, Semantic-, Object-, Walkability- und Interaction-Maps.
+Der Terrain Graph beschreibt Biome, Küstenrichtung, Uferlinie, Strandbreite, Felsigkeit, Waldstufe und Vegetationsdichte. Normale Bäume werden deterministisch verteilt und verbrauchen keine Landmark Slots.
 
-## Ergebnis des 0.5-Referenzlaufs
+## Ergebnis des 0.6-Referenzlaufs
 
 | Metrik | Ergebnis |
 |---|---:|
-| Presence Accuracy | 0,981 |
-| relatives Positions-MAE | 0,495 px |
-| absolutes Positions-MAE | 0,578 px |
-| Klassen-Accuracy | 0,759 |
-| Aktions-Accuracy | 0,697 |
-| Trigger-Accuracy | 0,771 |
-| Interaction IoU | 0,686 |
-| Seed-Token MAE | 65,1 |
-| Seed-Token Exact Accuracy | 0,0 |
+| Terrain Mean IoU | 0,970 |
+| Biome Accuracy | 1,000 |
+| Orientation Accuracy | 1,000 |
+| Terrain Parameter-MAE | 0,144 px |
+| Presence Accuracy | 0,983 |
+| Klassen-Accuracy | 0,937 |
+| Aktions-Accuracy | 0,928 |
+| Trigger-Accuracy | 0,935 |
+| absolutes Positions-MAE | 1,953 px |
+| Interaction IoU | 0,470 |
 
-Der 0.5-Referenzlauf bestätigt variable Slots und interaktive Metadaten. 0.5.1 ersetzte den gescheiterten Seed-Token-Kopf durch deterministische Übergänge. In 0.5.2 erhalten Klasse, Aktion und Trigger einen eigenen Attribute Encoder und Slot-Decoder, damit sie nicht mehr mit der Geometrie konkurrieren.
+Der 0.6-Referenzlauf bestätigt den Terrain Graph. 0.6.1 ersetzt die schwache absolute Positionsvorhersage durch `Terrainregion + Anchor` und führt deterministische Vegetation ein.
 
 ## Schnellstart
 
@@ -43,16 +45,16 @@ pip install -r requirements.txt
 jupyter lab
 ```
 
-Danach [`notebooks/PixelWorld_0_6.ipynb`](notebooks/PixelWorld_0_6.ipynb) öffnen und die Zellen der Reihe nach ausführen. Die Notebooks der 0.5-Reihe bleiben als Vergleiche erhalten.
+Danach [`notebooks/PixelWorld_0_6_1.ipynb`](notebooks/PixelWorld_0_6_1.ipynb) öffnen und die Zellen der Reihe nach ausführen. Das [`0.6-Notebook`](notebooks/PixelWorld_0_6.ipynb) bleibt als Vergleich erhalten.
 
-Das 0.6-Referenzexperiment verwendet 12.000 synthetische Landschaften, Batchgröße 128 und 45 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
+Das 0.6.1-Referenzexperiment verwendet 14.000 synthetische Landschaften, Batchgröße 128 und 45 Epochen. Die Laufzeit hängt stark von der verfügbaren Hardware ab.
 
 ## Architektur
 
 ```text
 Prompt + Seed
 ├─ Terrain Encoder → Biom, Küste, Strand und Felsigkeit
-├─ Geometry Encoder → absolute Slotpositionen
+├─ Placement Encoder → Terrainregion und Anchor
 ├─ Presence Encoder → vorhandene Slots
 └─ Attribute Encoder → Klasse, Aktion und Trigger
                        ↓
@@ -71,7 +73,7 @@ Weitere Details stehen in [`docs/architecture.md`](docs/architecture.md), die En
 - Weltgröße: `64 × 64` Pixel
 - maximale Slotzahl: `8`
 - ordinale Koordinatenklassifikation über 65 Pixelklassen
-- in 0.6 noch absolute Objektpositionen; terrainrelative Positionen folgen in 0.6.1
+- terrainrelative Landmark-Positionen über Region und Anchor
 - aktuell feste Objektgrößen pro Klasse
 
 Das Notebook enthält Generator, Targets, Modell, Training, Auswertung, Visualisierung und einen interaktiven Pixel-zu-Folgewelt-Prototyp in einer Datei.
@@ -79,7 +81,7 @@ Das Notebook enthält Generator, Targets, Modell, Training, Auswertung, Visualis
 ## Roadmap
 
 - **0.6:** Landschaft und Terrain
-- **0.6.1:** terrainrelative Positionen, Vegetation und Wälder
+- **0.6.1:** terrainrelative Positionen, Vegetation und Wälder – in Auswertung
 - **0.7:** Settlement Layer für Dörfer
 - **0.7.1:** Straßen, Grundstücke und Gebäude
 - **0.7.2:** Stadtbezirke und größere Städte

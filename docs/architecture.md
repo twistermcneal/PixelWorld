@@ -1,4 +1,4 @@
-# Architektur von PixelWorld 0.6
+# Architektur von PixelWorld 0.6.1
 
 ## Ziel
 
@@ -11,39 +11,41 @@ So bleiben Darstellung, Interaktion und Übergänge synchron. Das Modell muss ke
 
 ## Repräsentation
 
-Eine Außenwelt besteht aus einem parametrischen Terrain Graph und maximal acht kanonisch geordneten Slots. Jeder Slot trägt Presence, Klasse, Position, Aktion und Trigger.
+Eine Außenwelt besteht aus einem parametrischen Terrain Graph, einer Region Map, einem Vegetations-Layer und maximal acht kanonisch geordneten Landmark Slots. Jeder Slot trägt Presence, Klasse, Terrainregion, Anchor, Aktion und Trigger.
 
 Der Terrain Graph enthält:
 
 ```text
-Biom + Küstenrichtung + Uferlinie + Strandbreite + Felsigkeit
+Biom + Küstenrichtung + Uferlinie + Strandbreite + Felsigkeit + Waldstufe + Vegetationsdichte
 ```
 
 Die Größen sind weiterhin an die Klasse gebunden:
 
 | Klasse | Breite | Höhe |
 |---|---:|---:|
-| `tree` | 5 | 8 |
-| `rock` | 5 | 4 |
+| `chest` | 5 | 4 |
 | `npc` | 5 | 9 |
 | `portal` | 6 | 8 |
+| `ruin` | 8 | 8 |
 
 ## Modellköpfe
 
 | Kopf | Aufgabe | Ausgabe |
 |---|---|---|
 | Terrain | Landschaftsstruktur | Parameter und Kategorien |
-| Position | absolute Slotposition | X/Y je Slot |
+| Placement | terrainrelative Platzierung | Region und Anchor je Slot |
 | Presence | Slot vorhanden | binäres Logit je Slot |
 | Class | Objektart über Attribute Encoder | vier Klassen |
 | Action | mögliche Aktion über Attribute Encoder | drei Klassen |
 | Trigger | Übergangstyp über Attribute Encoder | vier Klassen |
 
-Presence und Attribute besitzen eigene Encoder. Dadurch konkurrieren weder Anwesenheit noch Klasse, Aktion und Trigger mit dem stärker gewichteten Positions-Loss.
+Terrain, Placement, Presence und Attribute besitzen eigene Encoder. Die absolute Pixelposition ist kein Lernziel mehr, sondern wird deterministisch aus Region, Anchor, Klasse und belegten Flächen aufgelöst.
 
 ## Maps
 
 - **Terrain Map:** Geländeklasse jedes Pixels
+- **Region Map:** Strand, offenes Land, Felsfeld oder Wald
+- **Vegetation Map:** deterministisch verteilte Bäume mit Mindestabstand
 - **Semantic Map:** semantische Klasse jedes Pixels
 - **Object Map:** eindeutige Slot-ID jedes Objektpixels
 - **Walkability Map:** begehbare und blockierte Terrainpixel
@@ -99,4 +101,4 @@ Ein Dorf bleibt dadurch bei jedem Besuch dasselbe Dorf. Story-State kann kontrol
 
 ## Nächste Architekturarbeit
 
-0.6.1 führt terrainrelative Objektpositionen und deterministische Vegetation ein. Ab 0.7 folgen Dörfer und Städte als Settlement Layer. Die detaillierte Reihenfolge steht in [`roadmap.md`](roadmap.md).
+Nach der Auswertung von 0.6.1 folgen Dörfer und Städte als Settlement Layer. Die detaillierte Reihenfolge steht in [`roadmap.md`](roadmap.md).

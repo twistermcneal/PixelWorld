@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+- absolute X/Y-Lernziele durch Terrainregion und einen von 16 Anchors ersetzt
+- Regionen für Strand, offenes Land, Felsfeld und Wald
+- Landmark Slots für Kiste, NPC, Portal und Ruine
+- deterministischer Vegetations-Scatter-Layer mit Mindestabstand
+- Waldstufe und Vegetationsdichte als zusätzliche Terrainparameter
+- eigener Placement Encoder für Region und Anchor
+- 14.000 Trainingslandschaften und 45 Epochen
+- 1.000 Generatorwelten und 200 pixelgenaue Landmark-Round-trips validiert
+
 ## 0.6 – Meilenstein 3
 
 - Terrain Graph mit Biom, Küstenrichtung, Uferlinie, Strandbreite und Felsigkeit
