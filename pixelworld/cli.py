@@ -34,6 +34,8 @@ def build_parser():
     train.add_argument("--epochs", type=int, default=45)
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--learning-rate", type=float, default=5e-4)
+    train.add_argument("--variant", choices=("A", "B", "C", "D", "E"))
+    train.add_argument("--offset-radius", type=int, choices=(8, 12, 16), default=8)
     train.add_argument("--run-id")
     train.add_argument("--device", choices=("cpu", "cuda"))
     train.add_argument("--stop-after-epoch", type=int, help=argparse.SUPPRESS)
@@ -57,10 +59,44 @@ def build_parser():
     golden = subparsers.add_parser("golden", help="compare a run with the Seed-42 oracle")
     golden.add_argument("--run", required=True)
     golden.add_argument("--oracle", default="outputs/0.6.1-reference")
+
+    study = subparsers.add_parser("study-placement", help="run the PixelWorld 0.6.2 placement study")
+    study.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44, 45, 46])
+    study.add_argument("--variants", nargs="+", choices=("A", "B", "C", "D", "E"), default=list("ABCDE"))
+    study.add_argument("--samples", type=int, default=14_000)
+    study.add_argument("--batch-size", type=int, default=128)
+    study.add_argument("--epochs", type=int, default=45)
+    study.add_argument("--device", choices=("cpu", "cuda"))
     return parser
 
 
 def command_train(args):
+    if args.version == "0.6.2":
+        from .versions.v0_6_2.config import PlacementConfig
+        from .versions.v0_6_2.training import PlacementRunStore, run_training as run_training_062
+
+        variant = args.variant or "B"
+        config = PlacementConfig(
+            variant=variant,
+            samples=args.samples,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            seed=args.seed,
+            learning_rate=args.learning_rate,
+            offset_radius=args.offset_radius,
+        ).validate()
+        if variant == "A":
+            raise ValueError("Variant A uses the frozen 0.6.1 path and is managed by study-placement")
+        run_id = args.run_id or f"v062-{variant}-seed{args.seed}"
+        store = PlacementRunStore.create(REPOSITORY_ROOT, config, run_id)
+        print(f"Run ID: {store.run_id}", flush=True)
+        result = run_training_062(
+            store,
+            device=args.device,
+            stop_after_epoch=args.stop_after_epoch,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     config = RunConfig(
         version=args.version,
         samples=args.samples,
@@ -117,6 +153,13 @@ def command_runs(_args):
 
 
 def command_resume(args):
+    from .versions.v0_6_2.training import PlacementRunStore, run_training as run_training_062
+
+    placement_store = PlacementRunStore(REPOSITORY_ROOT, args.run)
+    if (placement_store.path / "config.json").is_file():
+        result = run_training_062(placement_store, device=args.device, resume=True)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     store = RunStore.open(REPOSITORY_ROOT, args.run)
     status = json.loads((store.path / "status.json").read_text(encoding="utf-8"))["status"]
     if status == "completed":
@@ -135,6 +178,22 @@ def command_golden(args):
         raise RuntimeError("Golden parity failed")
 
 
+def command_study_placement(args):
+    from .versions.v0_6_2.study import run_study
+
+    device = args.device or ("cuda" if __import__("torch").cuda.is_available() else "cpu")
+    result = run_study(
+        REPOSITORY_ROOT,
+        seeds=tuple(args.seeds),
+        variants=tuple(args.variants),
+        samples=args.samples,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        device=device,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -145,6 +204,7 @@ def main(argv=None):
         "runs": command_runs,
         "resume": command_resume,
         "golden": command_golden,
+        "study-placement": command_study_placement,
     }
     try:
         handlers[args.command](args)
