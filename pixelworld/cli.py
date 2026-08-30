@@ -35,6 +35,12 @@ def build_parser():
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--learning-rate", type=float, default=5e-4)
     train.add_argument("--variant", choices=("A", "B", "C", "D", "E"))
+    train.add_argument(
+        "--gradient-mode",
+        choices=("standard", "measure", "pcgrad"),
+        default="standard",
+        help="D-only gradient conflict ablation mode",
+    )
     train.add_argument("--offset-radius", type=int, choices=(8, 12, 16), default=8)
     train.add_argument("--run-id")
     train.add_argument("--device", choices=("cpu", "cuda"))
@@ -84,10 +90,12 @@ def command_train(args):
             seed=args.seed,
             learning_rate=args.learning_rate,
             offset_radius=args.offset_radius,
+            gradient_mode=args.gradient_mode,
         ).validate()
         if variant == "A":
             raise ValueError("Variant A uses the frozen 0.6.1 path and is managed by study-placement")
-        run_id = args.run_id or f"v062-{variant}-seed{args.seed}"
+        mode_suffix = "" if args.gradient_mode == "standard" else f"-{args.gradient_mode.upper()}"
+        run_id = args.run_id or f"v062-{variant}{mode_suffix}-seed{args.seed}"
         store = PlacementRunStore.create(REPOSITORY_ROOT, config, run_id)
         print(f"Run ID: {store.run_id}", flush=True)
         result = run_training_062(

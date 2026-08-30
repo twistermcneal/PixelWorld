@@ -23,9 +23,12 @@ from pixelworld.versions.v0_6_2.study import (
 from pixelworld.versions.v0_6_2.training import (
     PlacementRunStore,
     compute_losses,
+    gradient_conflict_backward,
     initialize_training,
     load_checkpoint,
+    project_conflicting_gradients,
     run_training,
+    train_one_epoch,
 )
 
 
@@ -39,6 +42,17 @@ def config(variant, epochs=1):
         offset_radius=8,
         evaluation_seeds=(500000,),
     )
+
+
+def gradient_config(mode, epochs=1):
+    return PlacementConfig(
+        variant="D", gradient_mode=mode, samples=8, batch_size=4, epochs=epochs,
+        seed=42, offset_radius=8, evaluation_seeds=(500000,),
+    )
+
+
+def model_state(model):
+    return {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
 
 
 @pytest.mark.parametrize(
@@ -94,6 +108,72 @@ def test_variant_d_shares_offset_gradient_with_placement_path():
     assert gradient_sum(model.placement_decoder) > 0
 
 
+def test_measure_mode_is_bit_exact_to_standard_d():
+    standard = initialize_training(gradient_config("standard"), "cpu", progress=None)
+    train_one_epoch(standard, gradient_config("standard"), "cpu")
+    measured = initialize_training(gradient_config("measure"), "cpu", progress=None)
+    record = train_one_epoch(measured, gradient_config("measure"), "cpu")
+    assert all(torch.equal(model_state(standard.model)[name], tensor)
+               for name, tensor in model_state(measured.model).items())
+    assert "gradient_cosine_mean" in record
+
+
+def test_positive_gradient_is_not_projected():
+    gd = [torch.tensor([1.0, 0.0])]
+    go = [torch.tensor([2.0, 1.0])]
+    projected, stats = project_conflicting_gradients(gd, go, project=True)
+    assert torch.equal(projected[0], go[0])
+    assert not stats["projected"]
+
+
+def test_negative_gradient_is_projected_orthogonally():
+    gd = [torch.tensor([1.0, 0.0])]
+    go = [torch.tensor([-2.0, 1.0])]
+    projected, stats = project_conflicting_gradients(gd, go, project=True)
+    assert stats["projected"]
+    assert torch.dot(gd[0], projected[0]).abs() < 1e-6
+    assert abs(stats["post_cosine"]) < 1e-6
+
+
+def test_projection_handles_none_and_zero_norm():
+    projected, stats = project_conflicting_gradients(
+        [None, torch.zeros(2)], [torch.ones(2), torch.ones(2)], project=True
+    )
+    assert torch.equal(projected[0], torch.ones(2))
+    assert torch.equal(projected[1], torch.ones(2))
+    assert stats["discrete_norm"] == 0.0
+    assert not stats["projected"]
+
+
+def test_pcgrad_preserves_head_and_foreign_path_gradients():
+    cfg = gradient_config("pcgrad")
+    left = initialize_training(cfg, "cpu", progress=None)
+    batch = next(iter(left.loader))
+    losses = compute_losses(left.model, batch, cfg, "cpu", left.coord_values, left.ce, left.bce)
+    left.optimizer.zero_grad(); losses["loss"].backward()
+    expected = {name: p.grad.detach().clone() for name, p in left.model.named_parameters() if p.grad is not None}
+    right = initialize_training(cfg, "cpu", progress=None)
+    losses = compute_losses(right.model, batch, cfg, "cpu", right.coord_values, right.ce, right.bce)
+    right.optimizer.zero_grad(); gradient_conflict_backward(right.model, losses, project=True)
+    protected = ("offset_head", "region_head", "anchor_head", "terrain_", "presence_", "class_head", "action_head", "trigger_head", "attribute_")
+    for name, parameter in right.model.named_parameters():
+        if name.startswith(protected) and parameter.grad is not None:
+            assert torch.equal(parameter.grad, expected[name]), name
+
+
+def test_one_optimizer_step_per_batch(monkeypatch):
+    objects = initialize_training(gradient_config("pcgrad"), "cpu", progress=None)
+    calls = 0
+    original = objects.optimizer.step
+    def counted_step(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(objects.optimizer, "step", counted_step)
+    record = train_one_epoch(objects, gradient_config("pcgrad"), "cpu")
+    assert calls == record["batches"]
+
+
 def test_variant_e_auxiliary_head_updates_placement_path():
     model = create_model("E")
     model(torch.zeros(2, 81))[10].sum().backward()
@@ -134,6 +214,34 @@ def test_checkpoint_reload_and_incompatible_variant(tmp_path):
         load_checkpoint(store.path / "final.pt", config("D"), "cpu")
 
 
+def test_gradient_mode_checkpoint_reload_and_incompatibility(tmp_path):
+    cfg = gradient_config("measure")
+    store = PlacementRunStore.create(tmp_path, cfg, "checkpoint-d-measure")
+    run_training(store, device="cpu")
+    _, payload = load_checkpoint(store.path / "final.pt", cfg, "cpu")
+    assert payload["gradient_mode"] == "measure"
+    assert "gradient_cosine_mean" in payload["training_history"][0]
+    with pytest.raises(ValueError, match="gradient mode"):
+        load_checkpoint(store.path / "final.pt", gradient_config("pcgrad"), "cpu")
+
+
+def test_gradient_mode_resume_parity_including_statistics(tmp_path):
+    cfg = gradient_config("pcgrad", epochs=2)
+    continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-pcgrad")
+    run_training(continuous, device="cpu")
+    resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-pcgrad")
+    run_training(resumed, device="cpu", stop_after_epoch=1)
+    run_training(resumed, device="cpu", resume=True)
+    left = torch.load(continuous.path / "final.pt", weights_only=True)
+    right = torch.load(resumed.path / "final.pt", weights_only=True)
+    assert all(torch.equal(left["model_state_dict"][name], tensor)
+               for name, tensor in right["model_state_dict"].items())
+    for a, b in zip(left["training_history"], right["training_history"]):
+        assert {k:v for k,v in a.items() if k != "epoch_seconds"} == {
+            k:v for k,v in b.items() if k != "epoch_seconds"
+        }
+
+
 def test_checkpoint_rejects_old_latent_schema(tmp_path):
     store = PlacementRunStore.create(tmp_path, config("C"), "checkpoint-schema")
     run_training(store, device="cpu")
@@ -168,8 +276,15 @@ def test_cli_variant_selection_and_invalid_variant():
     args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D"])
     assert args.variant == "D"
     assert args.offset_radius == 8
+    args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "pcgrad"])
+    assert args.gradient_mode == "pcgrad"
     with pytest.raises(SystemExit):
         parser.parse_args(["train", "--version", "0.6.2", "--variant", "Z"])
+
+
+def test_gradient_modes_restricted_to_d():
+    with pytest.raises(ValueError, match="only for variant D"):
+        PlacementConfig(variant="C", gradient_mode="measure").validate()
 
 
 def fake_record(variant, seed, position, interaction):

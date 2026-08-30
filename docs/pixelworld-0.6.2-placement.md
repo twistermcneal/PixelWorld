@@ -1,5 +1,29 @@
 # PixelWorld 0.6.2 Placement-Vorprüfung
 
+## Isolierte Gradientenkonflikt-Ablation
+
+Die bestehende Variante D bleibt unverändert. Zwei D-basierte Diagnosemodi können
+über `--gradient-mode` gewählt werden:
+
+- `measure` (`D-MEASURE`) misst pro Batch den Konflikt zwischen
+  `2 * (Lregion + Lanchor)` und `Loffset`, verändert aber keine Gradienten.
+- `pcgrad` (`D-PCGRAD`) projiziert ausschließlich den Offsetgradienten im gemeinsam
+  verwendeten Placement-Encoder und -Decoder, wenn sein Skalarprodukt mit dem
+  diskreten Gradienten negativ ist. Offset-, Region- und Anchor-Heads sowie alle
+  fremden Modellpfade behalten ihre normalen Gradienten.
+
+Beispiele für kleine, getrennt benannte Vorprüfungen:
+
+```powershell
+python -m pixelworld.cli train --version 0.6.2 --variant D --gradient-mode measure --samples 32 --batch-size 8 --epochs 1 --run-id v062-D-MEASURE-smoke --device cpu
+python -m pixelworld.cli train --version 0.6.2 --variant D --gradient-mode pcgrad --samples 32 --batch-size 8 --epochs 1 --run-id v062-D-PCGRAD-smoke --device cuda
+```
+
+Trainingshistorie und Recovery-Checkpoints enthalten den Modus sowie
+epochengemittelte Kosinus-, Norm-, Konflikt- und Projektionsstatistiken. Checkpoints
+unterschiedlicher Modi sind absichtlich inkompatibel. Generator, Targets,
+Rasterizer, Modellgröße und Loss-Gewichte bleiben identisch zu D.
+
 PixelWorld 0.6.1 und Variante A bleiben unverändert bei sechs Latentwerten je Slot.
 Die Varianten B–E verwenden acht explizite Werte in dieser Reihenfolge:
 

@@ -164,6 +164,138 @@ def compute_losses(model, batch, config, device, coord_values, ce, bce):
     }
 
 
+CONFLICT_METRIC_FIELDS = (
+    "gradient_cosine_mean",
+    "gradient_cosine_median",
+    "gradient_cosine_std",
+    "gradient_cosine_min",
+    "gradient_cosine_max",
+    "gradient_cosine_p10",
+    "gradient_cosine_p25",
+    "gradient_cosine_p75",
+    "gradient_cosine_p90",
+    "gradient_negative_rate",
+    "gradient_projected_rate",
+    "gradient_discrete_norm_mean",
+    "gradient_offset_norm_mean",
+    "gradient_removed_norm_mean",
+    "gradient_removed_ratio_mean",
+    "gradient_cosine_post_mean",
+    "gradient_encoder_cosine_mean",
+    "gradient_decoder_cosine_mean",
+)
+
+
+def project_conflicting_gradients(discrete, offset, project=False, eps=1e-12):
+    """Measure and optionally project offset gradients without mutating inputs."""
+    pairs = [(gd, go) for gd, go in zip(discrete, offset) if gd is not None and go is not None]
+    if not pairs:
+        return list(offset), {
+            "cosine": 0.0,
+            "post_cosine": 0.0,
+            "discrete_norm": 0.0,
+            "offset_norm": 0.0,
+            "removed_norm": 0.0,
+            "removed_ratio": 0.0,
+            "negative": False,
+            "projected": False,
+        }
+    dot = sum((gd * go).sum() for gd, go in pairs)
+    discrete_sq = sum(gd.square().sum() for gd, _ in pairs)
+    offset_sq = sum(go.square().sum() for _, go in pairs)
+    discrete_norm = discrete_sq.sqrt()
+    offset_norm = offset_sq.sqrt()
+    denominator = discrete_norm * offset_norm + eps
+    cosine = dot / denominator if discrete_sq > 0 and offset_sq > 0 else dot.new_zeros(())
+    should_project = bool(project and dot.item() < 0 and discrete_sq.item() > 0)
+    coefficient = dot / (discrete_sq + eps) if should_project else dot.new_zeros(())
+    projected = [
+        None if go is None else go - coefficient * gd if gd is not None else go
+        for gd, go in zip(discrete, offset)
+    ]
+    removed_sq = sum(
+        (go - gp).square().sum()
+        for go, gp in zip(offset, projected)
+        if go is not None and gp is not None
+    )
+    post_pairs = [(gd, gp) for gd, gp in zip(discrete, projected) if gd is not None and gp is not None]
+    post_dot = sum((gd * gp).sum() for gd, gp in post_pairs)
+    post_sq = sum(gp.square().sum() for _, gp in post_pairs)
+    post_cosine = (
+        post_dot / (discrete_norm * post_sq.sqrt() + eps)
+        if discrete_sq.item() > 0 and post_sq.item() > 0
+        else dot.new_zeros(())
+    )
+    removed_norm = removed_sq.sqrt()
+    return projected, {
+        "cosine": float(cosine.detach()),
+        "post_cosine": float(post_cosine.detach()),
+        "discrete_norm": float(discrete_norm.detach()),
+        "offset_norm": float(offset_norm.detach()),
+        "removed_norm": float(removed_norm.detach()),
+        "removed_ratio": float((removed_norm / (offset_norm + eps)).detach()),
+        "negative": bool(cosine.item() < 0),
+        "projected": should_project,
+    }
+
+
+def gradient_conflict_backward(model, losses, project=False):
+    groups = (
+        ("encoder", tuple(model.placement_encoder.parameters())),
+        ("decoder", tuple(model.placement_decoder.parameters())),
+    )
+    shared = tuple(parameter for _, parameters in groups for parameter in parameters)
+    discrete_loss = 2.0 * (losses["region_loss"] + losses["anchor_loss"])
+    offset_loss = losses["offset_loss"]
+    discrete = torch.autograd.grad(discrete_loss, shared, retain_graph=True, allow_unused=True)
+    offset = torch.autograd.grad(offset_loss, shared, retain_graph=True, allow_unused=True)
+    projected, stats = project_conflicting_gradients(discrete, offset, project=project)
+    index = 0
+    for name, parameters in groups:
+        count = len(parameters)
+        _, group_stats = project_conflicting_gradients(
+            discrete[index : index + count], offset[index : index + count], project=False
+        )
+        stats[f"{name}_cosine"] = group_stats["cosine"]
+        index += count
+    losses["loss"].backward()
+    if project:
+        for parameter, gd, gp in zip(shared, discrete, projected):
+            if gd is None and gp is None:
+                continue
+            replacement = (torch.zeros_like(parameter) if gd is None else gd) + (
+                torch.zeros_like(parameter) if gp is None else gp
+            )
+            parameter.grad = replacement.detach().clone()
+    return stats
+
+
+def summarize_conflict_batches(records):
+    cosine = np.asarray([item["cosine"] for item in records], dtype=np.float64)
+    def mean(name):
+        return float(np.mean([item[name] for item in records]))
+    return {
+        "gradient_cosine_mean": float(cosine.mean()),
+        "gradient_cosine_median": float(np.median(cosine)),
+        "gradient_cosine_std": float(cosine.std()),
+        "gradient_cosine_min": float(cosine.min()),
+        "gradient_cosine_max": float(cosine.max()),
+        "gradient_cosine_p10": float(np.quantile(cosine, 0.10)),
+        "gradient_cosine_p25": float(np.quantile(cosine, 0.25)),
+        "gradient_cosine_p75": float(np.quantile(cosine, 0.75)),
+        "gradient_cosine_p90": float(np.quantile(cosine, 0.90)),
+        "gradient_negative_rate": mean("negative"),
+        "gradient_projected_rate": mean("projected"),
+        "gradient_discrete_norm_mean": mean("discrete_norm"),
+        "gradient_offset_norm_mean": mean("offset_norm"),
+        "gradient_removed_norm_mean": mean("removed_norm"),
+        "gradient_removed_ratio_mean": mean("removed_ratio"),
+        "gradient_cosine_post_mean": mean("post_cosine"),
+        "gradient_encoder_cosine_mean": mean("encoder_cosine"),
+        "gradient_decoder_cosine_mean": mean("decoder_cosine"),
+    }
+
+
 @dataclass
 class TrainingObjects:
     model: nn.Module
@@ -223,6 +355,7 @@ def train_one_epoch(objects, config, device):
     )
     totals = {name: 0.0 for name in names}
     batches = 0
+    conflict_batches = []
     for batch in objects.loader:
         losses = compute_losses(
             objects.model,
@@ -234,19 +367,29 @@ def train_one_epoch(objects, config, device):
             objects.bce,
         )
         objects.optimizer.zero_grad()
-        losses["loss"].backward()
+        if config.measures_gradient_conflicts:
+            conflict_batches.append(
+                gradient_conflict_backward(
+                    objects.model, losses, project=config.projects_gradient_conflicts
+                )
+            )
+        else:
+            losses["loss"].backward()
         objects.optimizer.step()
         for name in names:
             totals[name] += losses[name].item()
         batches += 1
     if torch.device(device).type == "cuda":
         torch.cuda.synchronize()
-    return {
+    result = {
         "batches": batches,
         **{name: totals[name] / max(1, batches) for name in names},
         "epoch_seconds": time.perf_counter() - started,
         "learning_rate": objects.optimizer.param_groups[0]["lr"],
     }
+    if conflict_batches:
+        result.update(summarize_conflict_batches(conflict_batches))
+    return result
 
 
 class PlacementRunStore:
@@ -311,7 +454,7 @@ HISTORY_FIELDS = (
     "trigger_loss",
     "epoch_seconds",
     "learning_rate",
-)
+) + CONFLICT_METRIC_FIELDS
 
 
 def write_history(store, history):
@@ -329,6 +472,7 @@ def checkpoint_payload(objects, config, history, completed_epochs, timings, prov
         "format_version": 3,
         "pixelworld_version": config.version,
         "variant": config.variant,
+        "gradient_mode": config.gradient_mode,
         "slot_latent_dim": SLOT_LATENT_DIM,
         "layout_dim": LAYOUT_DIM,
         "offset_radius": config.offset_radius,
@@ -353,6 +497,8 @@ def load_checkpoint(path, config, device, with_optimizer=False):
         raise ValueError("Checkpoint latent schema is incompatible with explicit 8-latent slots")
     if int(payload.get("offset_radius")) != config.offset_radius:
         raise ValueError("Checkpoint offset radius is incompatible with the requested run")
+    if payload.get("gradient_mode", "standard") != config.gradient_mode:
+        raise ValueError("Checkpoint gradient mode is incompatible with the requested run")
     model = create_model(config.variant).to(device)
     model.load_state_dict(payload["model_state_dict"])
     model.eval()
@@ -399,6 +545,8 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             payload = torch.load(latest, map_location=selected_device, weights_only=True)
             if payload.get("variant") != config.variant or payload.get("pixelworld_version") != config.version:
                 raise ValueError("Incompatible recovery checkpoint")
+            if payload.get("gradient_mode", "standard") != config.gradient_mode:
+                raise ValueError("Incompatible recovery checkpoint gradient mode")
             if payload.get("slot_latent_dim") != SLOT_LATENT_DIM or payload.get("layout_dim") != LAYOUT_DIM:
                 raise ValueError("Incompatible recovery checkpoint latent schema")
             objects.model.load_state_dict(payload["model_state_dict"])
