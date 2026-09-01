@@ -8,18 +8,26 @@ from .config import CONDITION_DIM, OFFSET_VARIANTS, VARIANTS
 
 
 class LandscapeNet062(LandscapeNet):
-    def __init__(self, variant, condition_dim=CONDITION_DIM, hidden=320):
+    def __init__(self, variant, condition_dim=CONDITION_DIM, hidden=320, detach_placement_queries=False):
         if variant not in OFFSET_VARIANTS:
             raise ValueError(f"LandscapeNet062 requires an offset variant, got {variant!r}")
         super().__init__(condition_dim=condition_dim, hidden=hidden)
         self.variant = variant
+        self.detach_placement_queries = bool(detach_placement_queries)
         self.offset_head = nn.Linear(hidden, 2)
         if variant == "E":
             self.xy_auxiliary_head = nn.Linear(hidden, 2)
 
     def forward(self, x):
         terrain = self.terrain_encoder(x)
-        placement = self.slots_for(self.placement_encoder(x), self.placement_decoder)
+        placement_queries = (
+            self.slot_queries.weight.detach()
+            if self.detach_placement_queries
+            else self.slot_queries.weight
+        )
+        placement = self.slots_for(
+            self.placement_encoder(x), self.placement_decoder, queries=placement_queries
+        )
         attributes = self.slots_for(self.attribute_encoder(x), self.attribute_decoder)
         offset_input = placement.detach() if self.variant in ("C", "E") else placement
         outputs = (
@@ -39,11 +47,11 @@ class LandscapeNet062(LandscapeNet):
         return outputs
 
 
-def create_model(variant):
+def create_model(variant, detach_placement_queries=False):
     if variant not in VARIANTS:
         raise ValueError(f"Unknown placement variant: {variant!r}")
     if variant == "A":
         return LandscapeNet()
     if variant == "B":
         return LandscapeNet(condition_dim=CONDITION_DIM)
-    return LandscapeNet062(variant)
+    return LandscapeNet062(variant, detach_placement_queries=detach_placement_queries)

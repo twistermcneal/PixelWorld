@@ -24,6 +24,25 @@ epochengemittelte Kosinus-, Norm-, Konflikt- und Projektionsstatistiken. Checkpo
 unterschiedlicher Modi sind absichtlich inkompatibel. Generator, Targets,
 Rasterizer, Modellgröße und Loss-Gewichte bleiben identisch zu D.
 
+### Gerichtete Query-Detach-Ablation
+
+`qdet-measure` (`D-QDET-MEASURE`) und `qdet-pcgrad` (`D-QDET-PCGRAD`)
+verwenden dieselben Query-Werte und dieselbe einzelne Query-Matrix wie D. Nur die
+Placement-Ansicht wird mit `slot_queries.weight.detach()` an den Placement-Decoder
+gegeben. Der Attribute-Decoder verwendet weiterhin `slot_queries.weight` mit
+normalem Gradientenfluss. Damit können Attribute-Losses die Queries trainieren,
+Placement-Losses jedoch nicht.
+
+`qdet-measure` misst Konflikte ohne Projektion. `qdet-pcgrad` projiziert bei einem
+negativen Konflikt weiterhin ausschließlich den Offsetgradienten in Placement-Encoder
+und Placement-Decoder. Parameterzahl, Heads, Targets, Rasterizer und Loss-Gewichte
+ändern sich nicht.
+
+```powershell
+python -m pixelworld.cli train --version 0.6.2 --variant D --gradient-mode qdet-measure --samples 32 --batch-size 8 --epochs 1 --run-id v062-D-QDET-MEASURE-smoke --device cpu
+python -m pixelworld.cli train --version 0.6.2 --variant D --gradient-mode qdet-pcgrad --samples 32 --batch-size 8 --epochs 1 --run-id v062-D-QDET-PCGRAD-smoke --device cuda
+```
+
 PixelWorld 0.6.1 und Variante A bleiben unverändert bei sechs Latentwerten je Slot.
 Die Varianten B–E verwenden acht explizite Werte in dieser Reihenfolge:
 

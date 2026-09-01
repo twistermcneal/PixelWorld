@@ -16,7 +16,7 @@ CONDITION_DIM = 4 + 6 + LAYOUT_DIM
 LOCAL_OFFSET_PIXELS = 8
 VARIANTS = ("A", "B", "C", "D", "E")
 OFFSET_VARIANTS = ("C", "D", "E")
-GRADIENT_MODES = ("standard", "measure", "pcgrad")
+GRADIENT_MODES = ("standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad")
 OFFSET_RADII = (8, 12, 16)
 AUXILIARY_LOSS_WEIGHT = 0.25
 OFFSET_LOSS_WEIGHT = 0.5
@@ -91,6 +91,8 @@ class PlacementConfig:
         data["condition_dim"] = CONDITION_DIM
         data["offset_target"] = "raw_seed_latent"
         data["anchor_frame"] = "resolved_region_candidate_bbox"
+        if self.detaches_placement_queries:
+            data["detach_placement_queries"] = True
         data["seeds"] = {
             "python": self.seed,
             "numpy": self.seed,
@@ -102,18 +104,25 @@ class PlacementConfig:
 
     @property
     def measures_gradient_conflicts(self):
-        return self.gradient_mode in ("measure", "pcgrad")
+        return self.gradient_mode in ("measure", "pcgrad", "qdet-measure", "qdet-pcgrad")
 
     @property
     def projects_gradient_conflicts(self):
-        return self.gradient_mode == "pcgrad"
+        return self.gradient_mode in ("pcgrad", "qdet-pcgrad")
+
+    @property
+    def detaches_placement_queries(self):
+        return self.gradient_mode in ("qdet-measure", "qdet-pcgrad")
 
     @classmethod
     def from_dict(cls, data):
         values = dict(data)
         values.pop("baseline_version", None)
         values.pop("seeds", None)
-        for name in ("slot_latent_dim", "layout_dim", "condition_dim", "offset_target", "anchor_frame"):
+        for name in (
+            "slot_latent_dim", "layout_dim", "condition_dim", "offset_target",
+            "anchor_frame", "detach_placement_queries",
+        ):
             values.pop(name, None)
         values["evaluation_seeds"] = tuple(values["evaluation_seeds"])
         return cls(**values).validate()

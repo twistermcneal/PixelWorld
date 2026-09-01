@@ -108,6 +108,28 @@ def test_variant_d_shares_offset_gradient_with_placement_path():
     assert gradient_sum(model.placement_decoder) > 0
 
 
+def test_qdet_placement_does_not_update_queries_but_attributes_do():
+    placement_model = create_model("D", detach_placement_queries=True)
+    outputs = placement_model(torch.zeros(2, 81))
+    (outputs[3].sum() + outputs[4].sum() + outputs[9].sum()).backward()
+    assert placement_model.slot_queries.weight.grad is None
+
+    attribute_model = create_model("D", detach_placement_queries=True)
+    outputs = attribute_model(torch.zeros(2, 81))
+    (outputs[6].sum() + outputs[7].sum() + outputs[8].sum()).backward()
+    assert attribute_model.slot_queries.weight.grad.abs().sum() > 0
+
+
+def test_query_detach_preserves_forward_values():
+    seed_everything(42)
+    standard = create_model("D")
+    detached = create_model("D", detach_placement_queries=True)
+    detached.load_state_dict(standard.state_dict())
+    x = torch.randn(3, 81)
+    left, right = standard(x), detached(x)
+    assert all(torch.equal(a, b) for a, b in zip(left, right))
+
+
 def test_measure_mode_is_bit_exact_to_standard_d():
     standard = initialize_training(gradient_config("standard"), "cpu", progress=None)
     train_one_epoch(standard, gradient_config("standard"), "cpu")
@@ -174,6 +196,50 @@ def test_one_optimizer_step_per_batch(monkeypatch):
     assert calls == record["batches"]
 
 
+def test_qdet_modes_isolate_foreign_parameters_and_attribute_logits():
+    measure_cfg = gradient_config("qdet-measure")
+    pcgrad_cfg = gradient_config("qdet-pcgrad")
+    measured = initialize_training(measure_cfg, "cpu", progress=None)
+    train_one_epoch(measured, measure_cfg, "cpu")
+    projected = initialize_training(pcgrad_cfg, "cpu", progress=None)
+    train_one_epoch(projected, pcgrad_cfg, "cpu")
+    measured_state, projected_state = model_state(measured.model), model_state(projected.model)
+    placement_prefixes = (
+        "placement_encoder.", "placement_decoder.", "region_head.",
+        "anchor_head.", "offset_head.",
+    )
+    for name, tensor in measured_state.items():
+        if not name.startswith(placement_prefixes):
+            assert torch.equal(tensor, projected_state[name]), name
+    assert any(
+        not torch.equal(tensor, projected_state[name])
+        for name, tensor in measured_state.items()
+        if name.startswith(("placement_encoder.", "placement_decoder."))
+    )
+    x = torch.randn(4, 81)
+    measured.model.eval(); projected.model.eval()
+    left, right = measured.model(x), projected.model(x)
+    for index in (5, 6, 7, 8):
+        assert torch.equal(left[index], right[index])
+
+
+def test_qdet_modes_isolate_foreign_parameters_after_one_batch():
+    measure_cfg = gradient_config("qdet-measure")
+    pcgrad_cfg = gradient_config("qdet-pcgrad")
+    measured = initialize_training(measure_cfg, "cpu", progress=None)
+    projected = initialize_training(pcgrad_cfg, "cpu", progress=None)
+    batch = next(iter(measured.loader))
+    for objects, cfg in ((measured, measure_cfg), (projected, pcgrad_cfg)):
+        losses = compute_losses(objects.model, batch, cfg, "cpu", objects.coord_values, objects.ce, objects.bce)
+        objects.optimizer.zero_grad()
+        gradient_conflict_backward(objects.model, losses, project=cfg.projects_gradient_conflicts)
+        objects.optimizer.step()
+    left, right = model_state(measured.model), model_state(projected.model)
+    for name in left:
+        if not name.startswith(("placement_encoder.", "placement_decoder.", "region_head.", "anchor_head.", "offset_head.")):
+            assert torch.equal(left[name], right[name]), name
+
+
 def test_variant_e_auxiliary_head_updates_placement_path():
     model = create_model("E")
     model(torch.zeros(2, 81))[10].sum().backward()
@@ -225,11 +291,40 @@ def test_gradient_mode_checkpoint_reload_and_incompatibility(tmp_path):
         load_checkpoint(store.path / "final.pt", gradient_config("pcgrad"), "cpu")
 
 
+def test_qdet_checkpoint_records_semantics_and_rejects_other_mode(tmp_path):
+    cfg = gradient_config("qdet-measure")
+    store = PlacementRunStore.create(tmp_path, cfg, "checkpoint-qdet-measure")
+    run_training(store, device="cpu")
+    _, payload = load_checkpoint(store.path / "final.pt", cfg, "cpu")
+    assert payload["gradient_mode"] == "qdet-measure"
+    assert payload["detach_placement_queries"] is True
+    assert payload["config"]["detach_placement_queries"] is True
+    with pytest.raises(ValueError, match="gradient mode"):
+        load_checkpoint(store.path / "final.pt", gradient_config("qdet-pcgrad"), "cpu")
+
+
 def test_gradient_mode_resume_parity_including_statistics(tmp_path):
     cfg = gradient_config("pcgrad", epochs=2)
     continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-pcgrad")
     run_training(continuous, device="cpu")
     resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-pcgrad")
+    run_training(resumed, device="cpu", stop_after_epoch=1)
+    run_training(resumed, device="cpu", resume=True)
+    left = torch.load(continuous.path / "final.pt", weights_only=True)
+    right = torch.load(resumed.path / "final.pt", weights_only=True)
+    assert all(torch.equal(left["model_state_dict"][name], tensor)
+               for name, tensor in right["model_state_dict"].items())
+    for a, b in zip(left["training_history"], right["training_history"]):
+        assert {k:v for k,v in a.items() if k != "epoch_seconds"} == {
+            k:v for k,v in b.items() if k != "epoch_seconds"
+        }
+
+
+def test_qdet_resume_parity_including_statistics(tmp_path):
+    cfg = gradient_config("qdet-pcgrad", epochs=2)
+    continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-qdet")
+    run_training(continuous, device="cpu")
+    resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-qdet")
     run_training(resumed, device="cpu", stop_after_epoch=1)
     run_training(resumed, device="cpu", resume=True)
     left = torch.load(continuous.path / "final.pt", weights_only=True)
@@ -278,6 +373,8 @@ def test_cli_variant_selection_and_invalid_variant():
     assert args.offset_radius == 8
     args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "pcgrad"])
     assert args.gradient_mode == "pcgrad"
+    args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "qdet-pcgrad"])
+    assert args.gradient_mode == "qdet-pcgrad"
     with pytest.raises(SystemExit):
         parser.parse_args(["train", "--version", "0.6.2", "--variant", "Z"])
 

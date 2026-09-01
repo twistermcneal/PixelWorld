@@ -313,7 +313,9 @@ def initialize_training(config, device, progress=print):
     if config.variant == "A":
         raise ValueError("Variant A must use the frozen PixelWorld 0.6.1 training path")
     seed_everything(config.seed)
-    model = create_model(config.variant).to(device)
+    model = create_model(
+        config.variant, detach_placement_queries=config.detaches_placement_queries
+    ).to(device)
     started = time.perf_counter()
     dataset = LandscapeDataset062(config.samples, config.offset_radius, progress)
     preparation = time.perf_counter() - started
@@ -473,6 +475,7 @@ def checkpoint_payload(objects, config, history, completed_epochs, timings, prov
         "pixelworld_version": config.version,
         "variant": config.variant,
         "gradient_mode": config.gradient_mode,
+        "detach_placement_queries": config.detaches_placement_queries,
         "slot_latent_dim": SLOT_LATENT_DIM,
         "layout_dim": LAYOUT_DIM,
         "offset_radius": config.offset_radius,
@@ -499,7 +502,11 @@ def load_checkpoint(path, config, device, with_optimizer=False):
         raise ValueError("Checkpoint offset radius is incompatible with the requested run")
     if payload.get("gradient_mode", "standard") != config.gradient_mode:
         raise ValueError("Checkpoint gradient mode is incompatible with the requested run")
-    model = create_model(config.variant).to(device)
+    if payload.get("detach_placement_queries", False) != config.detaches_placement_queries:
+        raise ValueError("Checkpoint query-detach semantics are incompatible with the requested run")
+    model = create_model(
+        config.variant, detach_placement_queries=config.detaches_placement_queries
+    ).to(device)
     model.load_state_dict(payload["model_state_dict"])
     model.eval()
     return model, payload
@@ -547,6 +554,8 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
                 raise ValueError("Incompatible recovery checkpoint")
             if payload.get("gradient_mode", "standard") != config.gradient_mode:
                 raise ValueError("Incompatible recovery checkpoint gradient mode")
+            if payload.get("detach_placement_queries", False) != config.detaches_placement_queries:
+                raise ValueError("Incompatible recovery checkpoint query-detach semantics")
             if payload.get("slot_latent_dim") != SLOT_LATENT_DIM or payload.get("layout_dim") != LAYOUT_DIM:
                 raise ValueError("Incompatible recovery checkpoint latent schema")
             objects.model.load_state_dict(payload["model_state_dict"])

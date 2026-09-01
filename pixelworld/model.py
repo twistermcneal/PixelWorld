@@ -60,8 +60,9 @@ class LandscapeNet(nn.Module):
         self.action_head = nn.Linear(hidden, 3)
         self.trigger_head = nn.Linear(hidden, 4)
 
-    def slots_for(self, world, decoder):
-        q = self.slot_queries.weight[None].expand(world.shape[0], -1, -1)
+    def slots_for(self, world, decoder, queries=None):
+        query_values = self.slot_queries.weight if queries is None else queries
+        q = query_values[None].expand(world.shape[0], -1, -1)
         c = world[:, None, :].expand(-1, self.slots, -1)
         return decoder(torch.cat([c, q], -1))
 
