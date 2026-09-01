@@ -15,6 +15,14 @@ from .training import resolve_device, run_training
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _add_llm_runtime_arguments(parser):
+    parser.add_argument("--llm-connect-timeout", help="connect timeout seconds; defaults to PIXELWORLD_LLM_CONNECT_TIMEOUT")
+    parser.add_argument("--llm-read-timeout", help="read timeout seconds; defaults to PIXELWORLD_LLM_READ_TIMEOUT")
+    parser.add_argument("--llm-total-timeout", help="hard total timeout seconds; defaults to PIXELWORLD_LLM_TOTAL_TIMEOUT")
+    parser.add_argument("--llm-max-output-tokens", help="bounded output-token limit; defaults to PIXELWORLD_LLM_MAX_OUTPUT_TOKENS")
+    parser.add_argument("--llm-max-response-bytes", help="bounded HTTP response limit; defaults to PIXELWORLD_LLM_MAX_RESPONSE_BYTES")
+
+
 def print_device(device):
     import torch
 
@@ -78,6 +86,7 @@ def build_parser():
     adventure_generate.add_argument("--llm-api-key", help="API key; prefer PIXELWORLD_LLM_API_KEY to avoid shell history")
     adventure_generate.add_argument("--llm-model", help="explicit model ID; defaults to PIXELWORLD_LLM_MODEL")
     adventure_generate.add_argument("--llm-protocol", choices=("responses-v1", "chat-completions-json-schema"), help="explicit provider protocol; defaults to PIXELWORLD_LLM_PROTOCOL")
+    _add_llm_runtime_arguments(adventure_generate)
     adventure_generate.add_argument("--output", required=True)
 
     director_check = subparsers.add_parser("adventure-director-check", help="check LLM protocol and strict schema compatibility without generating a game")
@@ -86,6 +95,7 @@ def build_parser():
     director_check.add_argument("--llm-api-key", help="API key; prefer PIXELWORLD_LLM_API_KEY to avoid shell history")
     director_check.add_argument("--llm-model", help="explicit model ID; defaults to PIXELWORLD_LLM_MODEL")
     director_check.add_argument("--llm-protocol", required=False, choices=("responses-v1", "chat-completions-json-schema"), help="required explicitly or via PIXELWORLD_LLM_PROTOCOL")
+    _add_llm_runtime_arguments(director_check)
 
     adventure_validate = subparsers.add_parser("adventure-validate", help="validate and compile an AdventureSpec")
     adventure_validate.add_argument("--spec", required=True)
@@ -222,9 +232,7 @@ def command_study_placement(args):
 
 
 def command_adventure_generate(args):
-    import os
-
-    from .adventure.director import FixtureStoryDirector, JsonStoryDirector, OpenAICompatibleConfig, OpenAICompatibleStoryDirector
+    from .adventure.director import FixtureStoryDirector, JsonStoryDirector, OpenAICompatibleStoryDirector
     from .adventure.pipeline import generate_adventure
 
     if args.director == "json":
@@ -234,33 +242,37 @@ def command_adventure_generate(args):
     elif args.director == "fixture":
         director = FixtureStoryDirector(args.fixture)
     else:
-        director = OpenAICompatibleStoryDirector(OpenAICompatibleConfig(
-            base_url=args.llm_base_url or os.environ.get("PIXELWORLD_LLM_BASE_URL", ""),
-            api_key=args.llm_api_key or os.environ.get("PIXELWORLD_LLM_API_KEY", ""),
-            model=args.llm_model or os.environ.get("PIXELWORLD_LLM_MODEL", ""),
-            protocol=args.llm_protocol or os.environ.get("PIXELWORLD_LLM_PROTOCOL", ""),
-        ))
+        director = OpenAICompatibleStoryDirector(_llm_config_from_args(args))
     result = generate_adventure(director, args.prompt, args.output)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def command_adventure_director_check(args):
-    import os
-
-    from .adventure.director import OpenAICompatibleConfig
     from .adventure.preflight import check_story_director
     from .adventure.transport import HTTPTransport
 
-    config = OpenAICompatibleConfig(
-        base_url=args.llm_base_url or os.environ.get("PIXELWORLD_LLM_BASE_URL", ""),
-        api_key=args.llm_api_key or os.environ.get("PIXELWORLD_LLM_API_KEY", ""),
-        model=args.llm_model or os.environ.get("PIXELWORLD_LLM_MODEL", ""),
-        protocol=args.llm_protocol or os.environ.get("PIXELWORLD_LLM_PROTOCOL", ""),
-    )
+    config = _llm_config_from_args(args)
     report = check_story_director(config, HTTPTransport())
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if not report["ok"]:
         raise RuntimeError("story director compatibility check failed")
+
+
+def _llm_config_from_args(args, environ=None):
+    from .adventure.director import resolve_openai_compatible_config
+
+    return resolve_openai_compatible_config(
+        base_url=args.llm_base_url,
+        api_key=args.llm_api_key,
+        model=args.llm_model,
+        protocol=args.llm_protocol,
+        connect_timeout=args.llm_connect_timeout,
+        read_timeout=args.llm_read_timeout,
+        total_timeout=args.llm_total_timeout,
+        max_output_tokens=args.llm_max_output_tokens,
+        max_response_bytes=args.llm_max_response_bytes,
+        environ=environ,
+    )
 
 
 def command_adventure_validate(args):

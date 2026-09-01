@@ -6,6 +6,7 @@
 - provider-neutraler OpenAI-kompatibler Director mit explizitem Responses-v1- oder Chat-Completions-JSON-Schema-Protokoll ohne Fallback
 - versioniertes providerfreundliches WireSpec mit deterministischer AdventureSpec-Transformation und Schema-Preflight
 - robuster HTTP-Transport mit getrenntem Connect-/Read- und hartem Total-Timeout
+- explizite begrenzte LLM-Laufzeitoptionen über CLI und Umgebung mit persistierter effektiver Provenienz
 - begrenzter einmaliger Repair-Loop und atomare Director-Provenienz
 - injizierbarer, timeout- und größenbegrenzter HTTP-Transport ohne Redirect-Folgen
 - strikt validierte AdventureSpec, RoomSpec und Scene Graphs

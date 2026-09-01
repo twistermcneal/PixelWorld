@@ -13,6 +13,7 @@ def check_story_director(config: OpenAICompatibleConfig, transport: StoryDirecto
     headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json", "Accept": "application/json"}
     report = {
         "protocol": config.protocol,
+        "runtime_configuration": config.runtime_configuration(),
         "base_url_valid": {"ok": True, "detail": "valid http/https base URL"},
         "model_configured": {"ok": True, "detail": "explicit model identifier configured"},
         "endpoint_reachable": {"ok": False, "detail": "not checked"},

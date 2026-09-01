@@ -11,17 +11,24 @@ from pathlib import Path
 import pytest
 
 from pixelworld.adventure.director import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_READ_TIMEOUT,
+    DEFAULT_TOTAL_TIMEOUT,
     FixtureStoryDirector,
     JsonStoryDirector,
     OpenAICompatibleConfig,
     OpenAICompatibleStoryDirector,
     decode_single_json_object,
+    resolve_openai_compatible_config,
 )
 from pixelworld.adventure.pipeline import generate_adventure
 from pixelworld.adventure.preflight import check_story_director
 from pixelworld.adventure.runtime import AdventureRuntime
 from pixelworld.adventure.structured_schema import PHASE2_THEMES, adventure_spec_json_schema, adventure_spec_to_wire, build_system_prompt, minimal_provider_probe_wire, provider_generation_json_schema, validate_provider_schema, wire_to_adventure_spec
 from pixelworld.adventure.transport import HTTPTransport, ResponseTooLarge, StoryDirectorTransport, TransportError, TransportHTTPError, TransportRedirect, TransportRequest, TransportResponse, TransportTimeout, protocol_endpoint, responses_endpoint, validate_base_url
+from pixelworld.cli import _llm_config_from_args, build_parser
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -325,9 +332,10 @@ def test_both_protocols_have_exact_endpoint_body_and_response_extraction(protoco
         assert body["text"]["format"] == {"type": "json_schema", "name": "pixelworld_adventure_spec_0_6_3", "strict": True, "schema": provider_generation_json_schema(protocol)}
         assert body["input"][0]["content"][0]["text"] == "storm premise"
     else:
-        assert set(body) == {"model", "messages", "response_format", "stream"}
+        assert set(body) == {"model", "messages", "response_format", "max_tokens", "stream"}
         assert body["messages"] == [{"role": "system", "content": build_system_prompt()}, {"role": "user", "content": "storm premise"}]
         assert body["response_format"] == {"type": "json_schema", "json_schema": {"name": "pixelworld_adventure_spec_0_6_3", "strict": True, "schema": provider_generation_json_schema(protocol)}}
+        assert body["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
 
 
 @pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
@@ -470,9 +478,9 @@ def test_http_transport_hard_total_timeout_stops_slow_trickle(slow_http_server):
 
 def test_http_transport_rejects_redirect_and_oversized_response(slow_http_server):
     with pytest.raises(TransportRedirect):
-        HTTPTransport().send(_http_request(slow_http_server + "/redirect"))
+        HTTPTransport().send(_http_request(slow_http_server + "/redirect", read=1.0))
     with pytest.raises(ResponseTooLarge):
-        HTTPTransport().send(_http_request(slow_http_server + "/large", maximum=1024))
+        HTTPTransport().send(_http_request(slow_http_server + "/large", read=1.0, maximum=1024))
 
 
 @pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
@@ -482,3 +490,109 @@ def test_provenance_records_exact_selected_protocol(protocol, tmp_path):
     generate_adventure(director, "idea", output)
     provenance = json.loads((output / "director_provenance.json").read_text(encoding="utf-8"))
     assert provenance["provider_protocol"] == protocol
+
+
+def test_runtime_configuration_defaults_are_bounded():
+    config = resolve_openai_compatible_config(
+        base_url="https://llm.example.test/v1", api_key=SECRET,
+        model="example-model-1", protocol="chat-completions-json-schema", environ={},
+    )
+    assert config.runtime_configuration() == {
+        "connect_timeout": DEFAULT_CONNECT_TIMEOUT,
+        "read_timeout": DEFAULT_READ_TIMEOUT,
+        "total_timeout": DEFAULT_TOTAL_TIMEOUT,
+        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "max_response_bytes": DEFAULT_MAX_RESPONSE_BYTES,
+    }
+
+
+def test_runtime_configuration_reads_environment_strings():
+    env = {
+        "PIXELWORLD_LLM_BASE_URL": "https://env.example/v1", "PIXELWORLD_LLM_API_KEY": SECRET,
+        "PIXELWORLD_LLM_MODEL": "env-model", "PIXELWORLD_LLM_PROTOCOL": "chat-completions-json-schema",
+        "PIXELWORLD_LLM_CONNECT_TIMEOUT": "12.5", "PIXELWORLD_LLM_READ_TIMEOUT": "240",
+        "PIXELWORLD_LLM_TOTAL_TIMEOUT": "300", "PIXELWORLD_LLM_MAX_OUTPUT_TOKENS": "18000",
+        "PIXELWORLD_LLM_MAX_RESPONSE_BYTES": "400000",
+    }
+    config = resolve_openai_compatible_config(environ=env)
+    assert config.base_url == "https://env.example/v1" and config.model == "env-model"
+    assert config.runtime_configuration() == {"connect_timeout": 12.5, "read_timeout": 240.0, "total_timeout": 300.0, "max_output_tokens": 18000, "max_response_bytes": 400000}
+
+
+def test_cli_runtime_values_override_environment():
+    args = build_parser().parse_args([
+        "adventure-director-check", "--llm-base-url", "https://cli.example/v1", "--llm-api-key", "cli-key",
+        "--llm-model", "cli-model", "--llm-protocol", "chat-completions-json-schema",
+        "--llm-connect-timeout", "7", "--llm-read-timeout", "100", "--llm-total-timeout", "120",
+        "--llm-max-output-tokens", "15000", "--llm-max-response-bytes", "300000",
+    ])
+    env = {
+        "PIXELWORLD_LLM_CONNECT_TIMEOUT": "1", "PIXELWORLD_LLM_READ_TIMEOUT": "2", "PIXELWORLD_LLM_TOTAL_TIMEOUT": "3",
+        "PIXELWORLD_LLM_MAX_OUTPUT_TOKENS": "4", "PIXELWORLD_LLM_MAX_RESPONSE_BYTES": "1024",
+    }
+    config = _llm_config_from_args(args, env)
+    assert config.runtime_configuration() == {"connect_timeout": 7.0, "read_timeout": 100.0, "total_timeout": 120.0, "max_output_tokens": 15000, "max_response_bytes": 300000}
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("connect_timeout", 0), ("connect_timeout", -1), ("connect_timeout", float("nan")),
+    ("connect_timeout", float("inf")), ("connect_timeout", True), ("connect_timeout", 30.1),
+    ("read_timeout", 0), ("read_timeout", -1), ("read_timeout", float("nan")),
+    ("read_timeout", float("inf")), ("read_timeout", True), ("read_timeout", 600.1),
+    ("total_timeout", 0), ("total_timeout", -1), ("total_timeout", float("nan")),
+    ("total_timeout", float("inf")), ("total_timeout", True), ("total_timeout", 900.1),
+    ("max_output_tokens", 0), ("max_output_tokens", -1), ("max_output_tokens", True), ("max_output_tokens", 20001),
+    ("max_response_bytes", 0), ("max_response_bytes", -1), ("max_response_bytes", True), ("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES + 1),
+])
+def test_runtime_configuration_rejects_invalid_nonfinite_boolean_and_oversized_values(field, value):
+    values = {"base_url": "https://host/v1", "api_key": SECRET, "model": "model", "protocol": "responses-v1", "read_timeout": 20, "total_timeout": 30}
+    values[field] = value
+    with pytest.raises(ValueError):
+        OpenAICompatibleConfig(**values).validate()
+
+
+@pytest.mark.parametrize("overrides,match", [
+    ({"connect_timeout": 25, "total_timeout": 20}, "at least connect"),
+    ({"read_timeout": 31, "total_timeout": 30}, "at least read"),
+])
+def test_runtime_configuration_rejects_timeout_ordering(overrides, match):
+    values = {"base_url": "https://host/v1", "api_key": SECRET, "model": "model", "protocol": "responses-v1"}
+    values.update(overrides)
+    with pytest.raises(ValueError, match=match):
+        OpenAICompatibleConfig(**values).validate()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("PIXELWORLD_LLM_CONNECT_TIMEOUT", "not-a-number"),
+    ("PIXELWORLD_LLM_CONNECT_TIMEOUT", "nan"),
+    ("PIXELWORLD_LLM_MAX_OUTPUT_TOKENS", "1.5"),
+    ("PIXELWORLD_LLM_MAX_RESPONSE_BYTES", "infinity"),
+])
+def test_runtime_environment_rejects_invalid_values(name, value):
+    env = {"PIXELWORLD_LLM_BASE_URL": "https://host/v1", "PIXELWORLD_LLM_API_KEY": SECRET, "PIXELWORLD_LLM_MODEL": "model", "PIXELWORLD_LLM_PROTOCOL": "responses-v1", name: value}
+    with pytest.raises(ValueError):
+        resolve_openai_compatible_config(environ=env)
+
+
+def test_runtime_configuration_is_in_provenance_without_secret(tmp_path):
+    config = OpenAICompatibleConfig("https://llm.example.test/v1", SECRET, "example-model-1", "chat-completions-json-schema", 8, 120, 150, 300000, 16000)
+    transport = FakeTransport([raw_spec(synthetic_lab_spec())])
+    output = tmp_path / "runtime-provenance"
+    generate_adventure(OpenAICompatibleStoryDirector(config, transport), "idea", output)
+    provenance = json.loads((output / "director_provenance.json").read_text(encoding="utf-8"))
+    assert provenance["runtime_configuration"] == {"connect_timeout": 8.0, "read_timeout": 120.0, "total_timeout": 150.0, "max_response_bytes": 300000, "max_output_tokens": 16000}
+    assert SECRET not in json.dumps(provenance)
+
+
+def test_preflight_and_generation_use_same_effective_runtime_configuration():
+    config = OpenAICompatibleConfig("https://llm.example.test/v1", SECRET, "example-model-1", "chat-completions-json-schema", 9, 90, 120, 250000, 17000)
+    models = TransportResponse(200, json.dumps({"data": [{"id": "example-model-1"}]}).encode())
+    preflight_transport = FakeTransport([models, json.dumps(minimal_provider_probe_wire())])
+    report = check_story_director(config, preflight_transport)
+    generation_transport = FakeTransport([raw_spec(synthetic_lab_spec())])
+    OpenAICompatibleStoryDirector(config, generation_transport).create_spec("idea")
+    expected = {"connect_timeout": 9.0, "read_timeout": 90.0, "total_timeout": 120.0, "max_response_bytes": 250000, "max_output_tokens": 17000}
+    assert report["runtime_configuration"] == expected
+    for request in preflight_transport.requests + generation_transport.requests:
+        assert (request.connect_timeout, request.read_timeout, request.total_timeout, request.max_response_bytes) == (9.0, 90.0, 120.0, 250000)
+    assert json.loads(generation_transport.requests[0].body)["max_tokens"] == 17000

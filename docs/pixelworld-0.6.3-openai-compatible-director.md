@@ -31,6 +31,18 @@ Erlaubt sind:
 
 Dieselben Werte lassen sich über `--llm-base-url`, `--llm-api-key`, `--llm-model` und `--llm-protocol` setzen. Für den Schlüssel ist die Umgebungsvariable vorzuziehen. Redirects werden nicht verfolgt; URL, Antwortgröße sowie Connect-, Read- und harter Gesamttimeout sind begrenzt.
 
+Die Laufzeitparameter folgen strikt `CLI > Umgebungsvariable > sicherer Default`:
+
+| Bedeutung | Umgebungsvariable | CLI | Default | Maximum |
+|---|---|---|---:|---:|
+| Connect-Timeout | `PIXELWORLD_LLM_CONNECT_TIMEOUT` | `--llm-connect-timeout` | 5 s | 30 s |
+| Read-Timeout | `PIXELWORLD_LLM_READ_TIMEOUT` | `--llm-read-timeout` | 20 s | 600 s |
+| harter Total-Timeout | `PIXELWORLD_LLM_TOTAL_TIMEOUT` | `--llm-total-timeout` | 30 s | 900 s |
+| Ausgabetokens | `PIXELWORLD_LLM_MAX_OUTPUT_TOKENS` | `--llm-max-output-tokens` | 12.000 | 20.000 |
+| HTTP-Antwortgröße | `PIXELWORLD_LLM_MAX_RESPONSE_BYTES` | `--llm-max-response-bytes` | 524.288 Bytes | 524.288 Bytes |
+
+Timeouts müssen endlich und positiv sein; Booleanwerte sind keine Zahlen. Connect und Read dürfen den Total-Timeout nicht überschreiten. Token- und Bytelimits müssen positive Ganzzahlen sein. Null, Unendlich und unbeschränkte Werte werden abgewiesen. Preflight und Generierung verwenden denselben Resolver und dieselbe validierte effektive Konfiguration.
+
 Für den ersten Smoke gegen den derzeitigen GX10-vLLM-Server ist `chat-completions-json-schema` zu verwenden. Dieser Pfad erwartet eine Chat-Template-fähige Textgeneration und extrahiert ausschließlich `choices[0].message.content`. Aktuelle vLLM-Versionen dokumentieren zwar zusätzlich eine Responses API, deren tatsächliche Verfügbarkeit und Structured-Output-Unterstützung hängt aber von der installierten Serverversion und dem Modell ab. `responses-v1` darf deshalb auf dem GX10 erst nach einem erfolgreichen expliziten Preflight gewählt werden. Die aktuelle offizielle vLLM-Dokumentation führt beide Endpunkte auf: [OpenAI-Compatible Server](https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/).
 
 ## Protokollverträge
@@ -54,6 +66,7 @@ Für den ersten Smoke gegen den derzeitigen GX10-vLLM-Server ist `chat-completio
       "schema": "<Provider-WireSpec-v1-Schema>"
     }
   },
+  "max_tokens": 12000,
   "stream": false
 }
 ```
@@ -99,7 +112,7 @@ Nach Decode-, Transformations-, Spec-, Compiler-, Validator- oder Solverfehler g
 
 Der Transport verwendet keine privaten `urllib`-Attribute. `http.client` und öffentliche Socket-Timeouts trennen Connect und Read; eine äußere Deadline erzwingt zusätzlich den harten Total-Timeout auch bei langsam tröpfelnden Antworten.
 
-Nur erfolgreiche Modellläufe schreiben `director_provenance.json`. Gespeichert werden unter anderem das tatsächlich gewählte Protokoll (`responses-v1` oder `chat-completions-json-schema`), Modell, sanitierte Base-URL, Prompt-/Response-Hashes, Versuchszahl, Compile-Digest, Zeit, Python- und Git-Identität. API-Key, Authorization-Header, Rohantwort, Reasoning und Response-Body eines Fehlers werden nie persistiert oder in Exceptions übernommen.
+Nur erfolgreiche Modellläufe schreiben `director_provenance.json`. Gespeichert werden unter anderem das tatsächlich gewählte Protokoll (`responses-v1` oder `chat-completions-json-schema`), Modell, sanitierte Base-URL, die fünf effektiven Laufzeitparameter, Prompt-/Response-Hashes, Versuchszahl, Compile-Digest, Zeit, Python- und Git-Identität. API-Key, Authorization-Header, Rohantwort, Reasoning und Response-Body eines Fehlers werden nie persistiert oder in Exceptions übernommen.
 
 ## Offline-Tests
 

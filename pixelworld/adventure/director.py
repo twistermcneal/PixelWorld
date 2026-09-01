@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
+import os
 import platform
 import re
 import subprocess
@@ -15,7 +17,7 @@ from pathlib import Path
 from .compiler import compile_adventure
 from .models import SCHEMA_VERSION
 from .structured_schema import PROVIDER_SCHEMA_NAME, PROVIDER_PROTOCOLS, build_system_prompt, provider_generation_json_schema, wire_to_adventure_spec
-from .transport import HTTPTransport, StoryDirectorTransport, TransportRequest, TransportResponse, protocol_endpoint, validate_base_url
+from .transport import MAX_HTTP_RESPONSE_BYTES, HTTPTransport, StoryDirectorTransport, TransportRequest, TransportResponse, protocol_endpoint, validate_base_url
 from .validation import require_valid_game
 
 MAX_MODEL_OUTPUT_BYTES = 128 * 1024
@@ -24,6 +26,15 @@ MAX_JSON_NODES = 10_000
 MAX_REPAIR_ERRORS = 8
 MAX_REPAIR_ERROR_LENGTH = 240
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+DEFAULT_CONNECT_TIMEOUT = 5.0
+DEFAULT_READ_TIMEOUT = 20.0
+DEFAULT_TOTAL_TIMEOUT = 30.0
+DEFAULT_MAX_OUTPUT_TOKENS = 12_000
+DEFAULT_MAX_RESPONSE_BYTES = MAX_HTTP_RESPONSE_BYTES
+MAX_CONNECT_TIMEOUT = 30.0
+MAX_READ_TIMEOUT = 600.0
+MAX_TOTAL_TIMEOUT = 900.0
+MAX_OUTPUT_TOKENS = 20_000
 
 
 class StoryDirector(ABC):
@@ -69,11 +80,11 @@ class OpenAICompatibleConfig:
     api_key: str
     model: str
     protocol: str
-    connect_timeout: float = 5.0
-    read_timeout: float = 20.0
-    total_timeout: float = 30.0
-    max_response_bytes: int = 512 * 1024
-    max_output_tokens: int = 12_000
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
+    read_timeout: float = DEFAULT_READ_TIMEOUT
+    total_timeout: float = DEFAULT_TOTAL_TIMEOUT
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
 
     def validate(self):
         base_url = validate_base_url(self.base_url)
@@ -83,17 +94,68 @@ class OpenAICompatibleConfig:
             raise ValueError("LLM model is required and must be an explicit model identifier")
         if self.protocol not in PROVIDER_PROTOCOLS:
             raise ValueError(f"LLM protocol is required and must be one of {', '.join(PROVIDER_PROTOCOLS)}")
-        for name in ("connect_timeout", "read_timeout", "total_timeout"):
+        timeout_maxima = {"connect_timeout": MAX_CONNECT_TIMEOUT, "read_timeout": MAX_READ_TIMEOUT, "total_timeout": MAX_TOTAL_TIMEOUT}
+        for name, maximum in timeout_maxima.items():
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-                raise ValueError(f"{name} must be a positive number")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= maximum:
+                raise ValueError(f"{name} must be a finite positive number no greater than {maximum:g}")
         if self.total_timeout < self.connect_timeout:
             raise ValueError("total_timeout must be at least connect_timeout")
-        if isinstance(self.max_response_bytes, bool) or not isinstance(self.max_response_bytes, int) or not 1024 <= self.max_response_bytes <= 2 * 1024 * 1024:
-            raise ValueError("max_response_bytes must be an integer from 1024 to 2097152")
-        if isinstance(self.max_output_tokens, bool) or not isinstance(self.max_output_tokens, int) or not 1 <= self.max_output_tokens <= 50_000:
-            raise ValueError("max_output_tokens must be an integer from 1 to 50000")
+        if self.total_timeout < self.read_timeout:
+            raise ValueError("total_timeout must be at least read_timeout")
+        if isinstance(self.max_response_bytes, bool) or not isinstance(self.max_response_bytes, int) or not 1024 <= self.max_response_bytes <= MAX_HTTP_RESPONSE_BYTES:
+            raise ValueError(f"max_response_bytes must be an integer from 1024 to {MAX_HTTP_RESPONSE_BYTES}")
+        if isinstance(self.max_output_tokens, bool) or not isinstance(self.max_output_tokens, int) or not 1 <= self.max_output_tokens <= MAX_OUTPUT_TOKENS:
+            raise ValueError(f"max_output_tokens must be an integer from 1 to {MAX_OUTPUT_TOKENS}")
         return OpenAICompatibleConfig(base_url, self.api_key, self.model, self.protocol, float(self.connect_timeout), float(self.read_timeout), float(self.total_timeout), self.max_response_bytes, self.max_output_tokens)
+
+    def runtime_configuration(self) -> dict:
+        return {
+            "connect_timeout": self.connect_timeout,
+            "read_timeout": self.read_timeout,
+            "total_timeout": self.total_timeout,
+            "max_output_tokens": self.max_output_tokens,
+            "max_response_bytes": self.max_response_bytes,
+        }
+
+
+def resolve_openai_compatible_config(*, base_url=None, api_key=None, model=None, protocol=None, connect_timeout=None, read_timeout=None, total_timeout=None, max_output_tokens=None, max_response_bytes=None, environ=None) -> OpenAICompatibleConfig:
+    """Resolve CLI values over environment values over bounded defaults."""
+    env = os.environ if environ is None else environ
+
+    def select(cli_value, env_name, default=""):
+        return cli_value if cli_value is not None else env.get(env_name, default)
+
+    return OpenAICompatibleConfig(
+        base_url=select(base_url, "PIXELWORLD_LLM_BASE_URL"),
+        api_key=select(api_key, "PIXELWORLD_LLM_API_KEY"),
+        model=select(model, "PIXELWORLD_LLM_MODEL"),
+        protocol=select(protocol, "PIXELWORLD_LLM_PROTOCOL"),
+        connect_timeout=_parse_number(select(connect_timeout, "PIXELWORLD_LLM_CONNECT_TIMEOUT", DEFAULT_CONNECT_TIMEOUT), "connect timeout"),
+        read_timeout=_parse_number(select(read_timeout, "PIXELWORLD_LLM_READ_TIMEOUT", DEFAULT_READ_TIMEOUT), "read timeout"),
+        total_timeout=_parse_number(select(total_timeout, "PIXELWORLD_LLM_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT), "total timeout"),
+        max_output_tokens=_parse_integer(select(max_output_tokens, "PIXELWORLD_LLM_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS), "max output tokens"),
+        max_response_bytes=_parse_integer(select(max_response_bytes, "PIXELWORLD_LLM_MAX_RESPONSE_BYTES", DEFAULT_MAX_RESPONSE_BYTES), "max response bytes"),
+    ).validate()
+
+
+def _parse_number(value, label: str):
+    if isinstance(value, bool):
+        raise ValueError(f"LLM {label} must be a number, not boolean")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"LLM {label} must be a finite positive number") from None
+
+
+def _parse_integer(value, label: str):
+    if isinstance(value, bool):
+        raise ValueError(f"LLM {label} must be an integer, not boolean")
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str) or not re.fullmatch(r"[+-]?\d+", value.strip()):
+        raise ValueError(f"LLM {label} must be an integer")
+    return int(value)
 
 
 class OpenAICompatibleStoryDirector(StoryDirector):
@@ -156,6 +218,7 @@ class OpenAICompatibleStoryDirector(StoryDirector):
             "schema_version": SCHEMA_VERSION,
             "director_type": self.source,
             "provider_protocol": self.config.protocol,
+            "runtime_configuration": self.config.runtime_configuration(),
             "model": self.config.model,
             "base_url": validate_base_url(self.config.base_url),
             "prompt_sha256": self._prompt_hash,
@@ -186,6 +249,7 @@ def build_provider_request_body(config: OpenAICompatibleConfig, user_text: str) 
         "model": config.model,
         "messages": [{"role": "system", "content": build_system_prompt()}, {"role": "user", "content": user_text}],
         "response_format": {"type": "json_schema", "json_schema": {"name": PROVIDER_SCHEMA_NAME, "strict": True, "schema": schema}},
+        "max_tokens": config.max_output_tokens,
         "stream": False,
     }
 
