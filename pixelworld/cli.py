@@ -67,6 +67,21 @@ def build_parser():
     study.add_argument("--batch-size", type=int, default=128)
     study.add_argument("--epochs", type=int, default=45)
     study.add_argument("--device", choices=("cpu", "cuda"))
+
+    adventure_generate = subparsers.add_parser("adventure-generate", help="compile and export a PixelWorld adventure")
+    adventure_generate.add_argument("--version", default="0.6.3", choices=("0.6.3",))
+    adventure_generate.add_argument("--director", default="fixture", choices=("fixture", "json"))
+    adventure_generate.add_argument("--prompt", default="Ein verrückter Wissenschaftler repariert seine Zeitmaschine")
+    adventure_generate.add_argument("--spec", help="AdventureSpec JSON used with --director json")
+    adventure_generate.add_argument("--output", required=True)
+
+    adventure_validate = subparsers.add_parser("adventure-validate", help="validate and compile an AdventureSpec")
+    adventure_validate.add_argument("--spec", required=True)
+    adventure_validate.add_argument("--max-states", type=int, default=1000)
+
+    adventure_solve = subparsers.add_parser("adventure-solve", help="solve a compiled adventure game")
+    adventure_solve.add_argument("--game", required=True)
+    adventure_solve.add_argument("--max-states", type=int, default=1000)
     return parser
 
 
@@ -194,6 +209,42 @@ def command_study_placement(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def command_adventure_generate(args):
+    from .adventure.director import FixtureStoryDirector, JsonStoryDirector
+    from .adventure.pipeline import generate_adventure
+
+    if args.director == "json":
+        if not args.spec:
+            raise ValueError("--director json requires --spec")
+        director = JsonStoryDirector(args.spec)
+    else:
+        director = FixtureStoryDirector()
+    result = generate_adventure(director, args.prompt, args.output)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def command_adventure_validate(args):
+    from .adventure.compiler import compile_adventure
+    from .adventure.director import JsonStoryDirector
+    from .adventure.validation import validate_game
+
+    spec = JsonStoryDirector(args.spec).create_spec("")
+    report = validate_game(compile_adventure(spec), max_states=args.max_states)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if not report["valid"]:
+        raise RuntimeError("AdventureSpec validation failed")
+
+
+def command_adventure_solve(args):
+    from .adventure.solver import solve_game
+
+    game = json.loads(Path(args.game).read_text(encoding="utf-8"))
+    result = solve_game(game, max_states=args.max_states)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result["solvable"]:
+        raise RuntimeError("adventure is not solvable within the state limit")
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -205,6 +256,9 @@ def main(argv=None):
         "resume": command_resume,
         "golden": command_golden,
         "study-placement": command_study_placement,
+        "adventure-generate": command_adventure_generate,
+        "adventure-validate": command_adventure_validate,
+        "adventure-solve": command_adventure_solve,
     }
     try:
         handlers[args.command](args)
