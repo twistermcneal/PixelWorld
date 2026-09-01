@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.3
+
+- erster vertikaler Prototyp für strukturierte LLM-zu-Adventure-Erzeugung
+- strikt validierte AdventureSpec, RoomSpec und Scene Graphs
+- versionierte Theme-Ontologie mit fünf Themes
+- deterministische 128×72-Golden-Room-Kompilierung
+- Vektor-Walkboxes, Kollisionsprüfung und geglättete Pfadsuche
+- deklarative Headless-Runtime mit validiertem Save/Load
+- begrenzter State-Space-Solver und vollständiger Vorabvalidator
+- offline nutzbarer HTML/Canvas-Browserexport mit eigenen Platzhaltern
+- CLI für Generierung, Validierung und Lösung
+
 ## 0.6.1
 
 - absolute X/Y-Lernziele durch Terrainregion und einen von 16 Anchors ersetzt

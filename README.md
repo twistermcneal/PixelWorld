@@ -4,7 +4,17 @@ PixelWorld erforscht einen generativen Weltbaukasten, der aus `Prompt + Seed` ei
 
 ## Aktueller Stand
 
-**Version 0.6.1 – Terrainregionen und Vegetation**
+**Version 0.6.3 – erster strukturierter Adventure-Room-Prototyp**
+
+0.6.3 ergänzt den von den reproduzierbaren 0.6.1-/0.6.2-Forschungspfaden getrennten Golden Room „Professor Knallberts chronochemisches Labor“. Eine streng validierte AdventureSpec wird deterministisch in RoomSpec, Scene Graph, Navigation, Runtime und einen offline spielbaren Browserexport kompiliert. Einstieg und Sicherheitsgrenzen beschreibt [`docs/pixelworld-0.6.3-llm-adventure-design.md`](docs/pixelworld-0.6.3-llm-adventure-design.md), der Raum selbst steht in [`docs/pixelworld-0.6.3-golden-room.md`](docs/pixelworld-0.6.3-golden-room.md).
+
+```powershell
+python -m pixelworld.cli adventure-generate --version 0.6.3 --director fixture --prompt "Ein verrückter Wissenschaftler repariert seine Zeitmaschine" --output outputs/adventures/0.6.3-golden-lab
+python -m pixelworld.cli adventure-validate --spec outputs/adventures/0.6.3-golden-lab/adventure_spec.json
+python -m pixelworld.cli adventure-solve --game outputs/adventures/0.6.3-golden-lab/game.json
+```
+
+**Reproduzierbare Forschungsbasis: Version 0.6.1 – Terrainregionen und Vegetation**
 
 Das Modell erzeugt strukturierte Außenwelten mit Terrain- und Region Graph sowie bis zu acht wichtigen Landmark Slots. Jeder vorhandene Slot enthält:
 
