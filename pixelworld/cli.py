@@ -70,10 +70,13 @@ def build_parser():
 
     adventure_generate = subparsers.add_parser("adventure-generate", help="compile and export a PixelWorld adventure")
     adventure_generate.add_argument("--version", default="0.6.3", choices=("0.6.3",))
-    adventure_generate.add_argument("--director", default="fixture", choices=("fixture", "json"))
+    adventure_generate.add_argument("--director", default="fixture", choices=("fixture", "json", "openai-compatible"))
     adventure_generate.add_argument("--fixture", default="golden_lab", choices=("golden_lab", "pirate_harbor"), help="explicit fixture selection; prompt text is never inspected")
     adventure_generate.add_argument("--prompt", default="Ein verrückter Wissenschaftler repariert seine Zeitmaschine")
     adventure_generate.add_argument("--spec", help="AdventureSpec JSON used with --director json")
+    adventure_generate.add_argument("--llm-base-url", help="OpenAI-compatible API root; defaults to PIXELWORLD_LLM_BASE_URL")
+    adventure_generate.add_argument("--llm-api-key", help="API key; prefer PIXELWORLD_LLM_API_KEY to avoid shell history")
+    adventure_generate.add_argument("--llm-model", help="explicit model ID; defaults to PIXELWORLD_LLM_MODEL")
     adventure_generate.add_argument("--output", required=True)
 
     adventure_validate = subparsers.add_parser("adventure-validate", help="validate and compile an AdventureSpec")
@@ -211,15 +214,23 @@ def command_study_placement(args):
 
 
 def command_adventure_generate(args):
-    from .adventure.director import FixtureStoryDirector, JsonStoryDirector
+    import os
+
+    from .adventure.director import FixtureStoryDirector, JsonStoryDirector, OpenAICompatibleConfig, OpenAICompatibleStoryDirector
     from .adventure.pipeline import generate_adventure
 
     if args.director == "json":
         if not args.spec:
             raise ValueError("--director json requires --spec")
         director = JsonStoryDirector(args.spec)
-    else:
+    elif args.director == "fixture":
         director = FixtureStoryDirector(args.fixture)
+    else:
+        director = OpenAICompatibleStoryDirector(OpenAICompatibleConfig(
+            base_url=args.llm_base_url or os.environ.get("PIXELWORLD_LLM_BASE_URL", ""),
+            api_key=args.llm_api_key or os.environ.get("PIXELWORLD_LLM_API_KEY", ""),
+            model=args.llm_model or os.environ.get("PIXELWORLD_LLM_MODEL", ""),
+        ))
     result = generate_adventure(director, args.prompt, args.output)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
