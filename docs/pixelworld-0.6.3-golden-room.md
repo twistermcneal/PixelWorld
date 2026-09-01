@@ -42,16 +42,19 @@ Die ersten drei Schritte sind unabhängig und können in beliebiger Reihenfolge 
 
 Der letzte Schritt setzt `time_machine.cooled`, `time_portal.active` und `cool_time_machine.completed` auf `true`. Damit ist die Endbedingung erfüllt. Verbrauchte Komponenten werden deterministisch entfernt; es gibt keine Sackgasse.
 
+Der zweite Generalitäts-Fixture „Käptin Kupferzahns Mondscheinhafen“ verwendet das Theme `pirate_harbor`, andere IDs und ein eigenes Layouttemplate. Mara nimmt in `take_harbor_key` einen Messingschlüssel und öffnet in `unlock_harbor_box` die Kapitänskiste; dadurch fällt der Fluchtsteg herunter und das Ziel ist nach zwei Schritten erreicht. Beide Fixture-Namen werden explizit gewählt und niemals aus dem Prompt erraten. `FixtureStoryDirector` ist eine kuratierte Testdatenquelle, kein LLM.
+
 ## CLI und Artefakte
 
 ```powershell
 python -m pixelworld.cli adventure-generate --version 0.6.3 --director fixture --prompt "Ein verrückter Wissenschaftler repariert seine Zeitmaschine" --output outputs/adventures/0.6.3-golden-lab
+python -m pixelworld.cli adventure-generate --version 0.6.3 --director fixture --fixture pirate_harbor --output outputs/adventures/0.6.3-pirate-harbor
 python -m pixelworld.cli adventure-validate --spec outputs/adventures/0.6.3-golden-lab/adventure_spec.json
 python -m pixelworld.cli adventure-solve --game outputs/adventures/0.6.3-golden-lab/game.json
 python -m http.server 8000 --directory outputs/adventures/0.6.3-golden-lab
 ```
 
-Der Ausgabeordner enthält AdventureSpec, RoomSpec, Scene Graph, vollständiges Spiel, Validierungsbericht, Lösung, HTML, JavaScript, CSS und `assets/`. Er ist durch `.gitignore` ausgeschlossen und gehört nicht in Commits.
+Der Ausgabeordner enthält AdventureSpec, RoomSpec, Scene Graph, vollständiges Spiel, Validierungsbericht, Lösung, HTML, den Browser-/Node-Runtime-Core, UI-JavaScript, CSS und `assets/`. Der Browser lädt `game.json`, daher dient der gezeigte HTTP-Server als lokaler Startweg. Der Ordner ist durch `.gitignore` ausgeschlossen und gehört nicht in Commits; vorhandene Ausgabeordner werden nicht überschrieben.
 
 ## Aktuelle Platzhalter und nächste Schritte
 

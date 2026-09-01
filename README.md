@@ -10,6 +10,7 @@ PixelWorld erforscht einen generativen Weltbaukasten, der aus `Prompt + Seed` ei
 
 ```powershell
 python -m pixelworld.cli adventure-generate --version 0.6.3 --director fixture --prompt "Ein verrückter Wissenschaftler repariert seine Zeitmaschine" --output outputs/adventures/0.6.3-golden-lab
+python -m pixelworld.cli adventure-generate --version 0.6.3 --director fixture --fixture pirate_harbor --output outputs/adventures/0.6.3-pirate-harbor
 python -m pixelworld.cli adventure-validate --spec outputs/adventures/0.6.3-golden-lab/adventure_spec.json
 python -m pixelworld.cli adventure-solve --game outputs/adventures/0.6.3-golden-lab/game.json
 ```

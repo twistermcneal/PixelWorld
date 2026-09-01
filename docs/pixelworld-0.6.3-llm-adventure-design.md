@@ -19,9 +19,11 @@ Nicht enthalten sind mehrere Räume, Netzwerkzugriffe, Audio, freie Codegenerier
 
 ## Verträge und Sicherheitsgrenzen
 
-Alle JSON-Verträge tragen `schema_version: "0.6.3"`. `AdventureSpec` umfasst Titel, Prämisse, Ton, visuelles Theme, Spieler, Figuren, Orte, Objekte, Inventarobjekte, Ziele, Rätsel, Interaktionen und Endbedingungen. Die Validierung lehnt unbekannte Felder rekursiv ab. IDs entsprechen `^[a-z][a-z0-9_]{0,63}$`, sind je Namensraum eindeutig und werden referenziell geprüft. Damit können IDs weder Pfade noch Shellfragmente sein.
+Alle JSON-Verträge tragen `schema_version: "0.6.3"`. `AdventureSpec` umfasst Titel, Prämisse, Ton, visuelles Theme, Spieler, Figuren, Orte, Objekte, Inventarobjekte, Ziele, Rätsel, Interaktionen, deklarierte Flags und Endbedingungen. Figuren und Objekte tragen außerdem Rolle, bevorzugte Layoutzone und vollständigen Initialzustand; NPC-Dialog und Portalziel sind explizite Daten. Die Validierung lehnt unbekannte Felder rekursiv ab. IDs entsprechen `^[a-z][a-z0-9_]{0,63}$`, sind je Namensraum eindeutig und werden referenziell geprüft. Object- und Character-IDs dürfen sich nicht überschneiden. Eine Inventory-ID darf genau dann einer Object-ID entsprechen, wenn dieses Objekt tragbar ist; jedes tragbare Objekt muss eine entsprechende Inventory-Definition besitzen.
 
-Interaktionsbedingungen bestehen nur aus `equals`, `inventory_contains` und `inventory_missing`; Effekte nur aus `set`, `inventory_add` und `inventory_remove`. Zustandszugriffe sind auf `objects`, `objectives` und `flags` begrenzt. Weder Python-Ausdrücke noch JavaScript, Shellcode, Templates oder dynamische Importe werden aus der Spec ausgeführt.
+Phase 1 begrenzt nicht vertrauenswürdige Ausgaben fest auf einen Ort, zwei Figuren, 16 Objekte, 16 Inventarobjekte, 16 Interaktionen, acht Ziele, acht Rätsel, vier Endbedingungen und 16 deklarierte Flags. Polygone, Referenz-, Bedingungs- und Effektlisten sind ebenfalls begrenzt. Titel, Namen, Beschreibungen, Dialoge und Interaktionstexte besitzen dokumentierte Längenlimits von 64 bis 800 Zeichen. Zustandsstrings sind maximal 160 Zeichen lang; Zustandszahlen müssen endlich sein und innerhalb ±1.000.000.000 liegen. Koordinaten sind echte, endliche Zahlen – `bool` gilt nicht als Zahl – und werden zusätzlich gegen die 128×72-Raumgrenzen geprüft. Nur die bekannten, flachen Strukturen sind erlaubt; dadurch ist die JSON-Verschachtelung implizit begrenzt.
+
+Interaktionsbedingungen bestehen nur aus `equals`, `inventory_contains` und `inventory_missing`; Effekte nur aus `set`, `inventory_add` und `inventory_remove`. `take`, `use` und `combine` verlangen exakt null, ein beziehungsweise zwei unterschiedliche Item-IDs; ein Combine-Ziel muss ein tragbarer Inventarcontainer sein. `talk_to` und `look_at` haben keine Items, `move_to` ist keine deklarative Interaction. Zustandszugriffe sind auf vorab bekannte Felder in `objects`, `objectives` und deklarierten `flags` begrenzt. Pfad, Operation und Werttyp werden bereits vor dem Kompilieren gegeneinander geprüft. Weder Python-Ausdrücke noch JavaScript, Shellcode, Templates oder dynamische Importe werden aus der Spec ausgeführt.
 
 `StoryDirector` ist eine provider-neutrale abstrakte Schnittstelle. `FixtureStoryDirector` liefert die kuratierte Golden-Spec, `JsonStoryDirector` lädt eine vorhandene Spec. Ein späterer OpenAI- oder lokaler Adapter muss lediglich dieselbe Schnittstelle implementieren. Seine Ausgabe durchläuft unverändert die strikte Validierung; Compiler und Runtime benötigen keine Providerkenntnis.
 
@@ -33,7 +35,7 @@ Ein unbekanntes Theme, eine abweichende Ortstheme oder eine inkompatible Objekt-
 
 ## Compiler, RoomSpec und Scene Graph
 
-Der Compiler nimmt ausschließlich eine validierte AdventureSpec entgegen. Er erzeugt ein RoomSpec mit Pflichtentitäten, Ausgang, Spielerstart und Zielen sowie einen Scene Graph mit Hintergrundebenen, semantischen Regionen, Walkboxes, Navigationskanten, Kollisions- und Okklusionspolygonen, Entitäten, Hotspots, Walk-to-Punkten, Z-Ebenen, Portalen und Initialzustand.
+Der Compiler nimmt ausschließlich eine validierte AdventureSpec entgegen. Er erzeugt ein RoomSpec mit Pflichtentitäten, Ausgang, Spielerstart und Zielen sowie einen Scene Graph mit Hintergrundebenen, semantischen Regionen, Walkboxes, Navigationskanten, Kollisions- und Okklusionspolygonen, Entitäten, Hotspots, Walk-to-Punkten, Z-Ebenen, Portalen und Initialzustand. Phase 1 besitzt deterministische, themenspezifische Templates für Labor und Piratenhafen. Innerhalb eines Templates erfolgt die Platzierung nach Theme, Klasse, Hotspotrolle und deklarierter `preferred_zone`; konkrete Entity-IDs beeinflussen die Platzierung nicht. Mehrfach belegbare Zonen verwenden stabile Klassen-/Rollen-/ID-Tie-Breaks.
 
 Phase 1 verwendet eine feste logische Größe von **128 × 72**. 64 × 64 bleibt sinnvoll für die bisherigen Außenweltstudien, bietet in einem Innenraum mit 28 Pixel breiter zentraler Maschine aber zu wenig seitlichen Navigationsraum und zu kleine, voneinander unterscheidbare Hotspots. 128 × 72 hält ein 16:9-Browserbild, erlaubt Vordergrundstaffelung und bleibt klein genug für echte Pixel-Art.
 
@@ -47,9 +49,9 @@ Der Validator prüft jeden Walk-to-Punkt und berechnet vom Start eine Route zu j
 
 ## Runtime und Zustandsmodell
 
-`AdventureRuntime` verwaltet Spielerposition, sortiertes Inventar, Objektzustände, Zielzustände, Flags und Abschlussstatus. Unterstützt werden `move_to`, `look_at`, `talk_to`, `take`, `use` und `combine`. Jede Aktion liefert Erfolg, Text, konkrete Zustandsänderungen, Animationshinweis, Bewegungsroute und die danach verfügbaren Aktionen.
+`AdventureRuntime` verwaltet Spielerposition, sortiertes Inventar, Objektzustände, Zielzustände, Flags und Abschlussstatus. Der Compiler liefert dazu ein vollständiges `state_schema` mit allen IDs, Feldern und exakten JSON-Typen. Unterstützt werden `move_to`, `look_at`, `talk_to`, `take`, `use` und `combine`. Look-, Talk- und Interaction-Texte stammen aus kompilierten Daten. Jede Aktion liefert Erfolg, Text, konkrete Zustandsänderungen, Animationshinweis, Bewegungsroute und die danach verfügbaren Aktionen.
 
-Save/Load serialisiert ausschließlich das validierte Runtime-Schema. Version, Feldmenge, Spielerposition, Inventar-IDs sowie Objekt- und Zielnamensräume werden beim Laden geprüft.
+Save/Load serialisiert ausschließlich das validierte Runtime-Schema und den Compile-Digest. Version, Digest, sämtliche verschachtelten IDs/Felder/Typen, Flags, Inventar, endliche begehbare Spielerposition und Endzustand werden beim Laden geprüft. `completed` wird gegen die Endbedingungen neu berechnet; ein Save eines anderen Spiels oder ein gefälschter Abschluss wird abgewiesen. Interaktionen wenden alle Effekte auf einer Kopie an, validieren den gesamten Folgezustand und übernehmen ihn erst danach. Ein später fehlschlagender Effekt hinterlässt daher weder in Python noch JavaScript Teiländerungen.
 
 ## Validator und Solver
 
@@ -59,9 +61,11 @@ Der Solver ist eine begrenzte Breitensuche über zulässige deklarative Interakt
 
 ## Browserexport
 
-Der Export besteht aus statischem HTML, CSS und JavaScript ohne Framework, CDN oder Netzwerkzugriff. Die Canvas-Szene rendert eigene geometrische Pixel-Platzhalter, Entitäten nach Klasse, Spieler, Inventar, Hotspotauswahl, kontextuelle Aktionen, Portal-/Maschinenzustand sowie umschaltbare Walkbox-, Kollisions- und Walk-to-Debugdaten.
+Der Export besteht aus statischem HTML, CSS und JavaScript ohne Framework, CDN oder externe Netzwerkzugriffe. `game.json` ist die einzige Spieldatenquelle; dadurch können spätere Texte mit `</script>`, HTML oder Unicode nicht in ein Script-Element ausbrechen. Die UI schreibt Texte nur über `textContent`. Die Canvas-Szene rendert eigene geometrische Pixel-Platzhalter, Entitäten nach Klasse, Spieler, auswählbare Inventargegenstände, Hotspotauswahl, kontextuelle Aktionen, Portalzustand sowie umschaltbare Walkbox- und Kollisionsdaten.
 
-Die JavaScript-Runtime interpretiert `runtime_rules` und den Scene Graph generisch. Golden-Room-IDs steuern keine Sonderzweige. Das kompilierte Spiel wird als Datenkonstante eingebettet, weshalb `index.html` auch per `file://` geöffnet werden kann. Ein lokaler HTTP-Server ist für reproduzierbare Browser-Smoke-Tests dennoch vorzuziehen.
+Der generische JavaScript-Core (`runtime-core.js`, für Node bytegleich als `.cjs`) ist von DOM und Canvas getrennt. Python und JavaScript interpretieren Bedingungen, Effekte, Verfügbarkeit, Container im Inventar, Endbedingungen, Polygonränder, Projektion und numerische Tie-Breaks gleich. Automatische Node-Replays führen für Labor und Piratenhafen exakt den Python-Solverweg aus und vergleichen nach jedem Schritt Inventar, Objekte, Ziele, Flags und Abschluss. Golden-Room-IDs steuern keine Sonderzweige. Da `game.json` per `fetch` geladen wird, startet der Export über einen lokalen statischen HTTP-Server statt direkt per `file://`.
+
+Generierte Dateien werden zunächst vollständig in ein temporäres Nachbarverzeichnis geschrieben, validiert und erst danach atomar an den Zielpfad verschoben. Einzelne JSON-, HTML-, CSS- und JavaScript-Dateien werden ebenfalls über temporäre Dateien ersetzt. Vorhandene Zielverzeichnisse werden nicht überschrieben; bei Validierungs- oder Solverfehlern bleibt kein Teilexport zurück.
 
 ## Spätere Entwicklung
 
