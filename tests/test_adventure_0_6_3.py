@@ -188,15 +188,15 @@ def test_json_story_director_and_browser_export(spec, tmp_path):
     result = generate_adventure(JsonStoryDirector(spec_path), "ignored", tmp_path / "game")
     assert result["source"] == "json"
     assert result["valid"] and result["solvable"]
-    for name in ("adventure_spec.json", "room_spec.json", "scene_graph.json", "game.json", "validation_report.json", "solution.json", "index.html", "runtime.js", "styles.css", "assets/lab-placeholder.svg"):
+    for name in ("adventure_spec.json", "room_spec.json", "scene_graph.json", "game.json", "validation_report.json", "solution.json", "index.html", "runtime-core.js", "runtime-core.cjs", "runtime.js", "styles.css", "assets/room-placeholder.svg"):
         assert (tmp_path / "game" / name).is_file()
 
 
 def test_browser_runtime_has_no_golden_room_special_case_logic():
     assert "target_id===\"time_machine\"" not in RUNTIME_TEMPLATE
     assert "selected===\"coolant_red\"" not in RUNTIME_TEMPLATE
-    assert "interaction.effects.forEach(effect)" in RUNTIME_TEMPLATE
-    assert "GAME.runtime_rules" in RUNTIME_TEMPLATE
+    assert "for(const effect of i.effects)this.effect(effect,next)" in RUNTIME_TEMPLATE
+    assert "this.game.runtime_rules" in RUNTIME_TEMPLATE
 
 
 def test_cli_generation_validation_and_solver(tmp_path, capsys):
