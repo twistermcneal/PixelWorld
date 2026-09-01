@@ -37,7 +37,10 @@ def build_parser():
     train.add_argument("--variant", choices=("A", "B", "C", "D", "E"))
     train.add_argument(
         "--gradient-mode",
-        choices=("standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad"),
+        choices=(
+            "standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad",
+            "split-measure",
+        ),
         default="standard",
         help="D-only gradient conflict ablation mode",
     )

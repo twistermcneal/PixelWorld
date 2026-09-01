@@ -16,7 +16,10 @@ CONDITION_DIM = 4 + 6 + LAYOUT_DIM
 LOCAL_OFFSET_PIXELS = 8
 VARIANTS = ("A", "B", "C", "D", "E")
 OFFSET_VARIANTS = ("C", "D", "E")
-GRADIENT_MODES = ("standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad")
+GRADIENT_MODES = (
+    "standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad", "split-measure",
+)
+SPLIT_QUERY_SCHEMA_VERSION = 1
 OFFSET_RADII = (8, 12, 16)
 AUXILIARY_LOSS_WEIGHT = 0.25
 OFFSET_LOSS_WEIGHT = 0.5
@@ -93,6 +96,9 @@ class PlacementConfig:
         data["anchor_frame"] = "resolved_region_candidate_bbox"
         if self.detaches_placement_queries:
             data["detach_placement_queries"] = True
+        if self.splits_placement_queries:
+            data["split_placement_queries"] = True
+            data["query_schema_version"] = SPLIT_QUERY_SCHEMA_VERSION
         data["seeds"] = {
             "python": self.seed,
             "numpy": self.seed,
@@ -104,7 +110,9 @@ class PlacementConfig:
 
     @property
     def measures_gradient_conflicts(self):
-        return self.gradient_mode in ("measure", "pcgrad", "qdet-measure", "qdet-pcgrad")
+        return self.gradient_mode in (
+            "measure", "pcgrad", "qdet-measure", "qdet-pcgrad", "split-measure",
+        )
 
     @property
     def projects_gradient_conflicts(self):
@@ -114,6 +122,10 @@ class PlacementConfig:
     def detaches_placement_queries(self):
         return self.gradient_mode in ("qdet-measure", "qdet-pcgrad")
 
+    @property
+    def splits_placement_queries(self):
+        return self.gradient_mode == "split-measure"
+
     @classmethod
     def from_dict(cls, data):
         values = dict(data)
@@ -121,7 +133,8 @@ class PlacementConfig:
         values.pop("seeds", None)
         for name in (
             "slot_latent_dim", "layout_dim", "condition_dim", "offset_target",
-            "anchor_frame", "detach_placement_queries",
+            "anchor_frame", "detach_placement_queries", "split_placement_queries",
+            "query_schema_version",
         ):
             values.pop(name, None)
         values["evaluation_seeds"] = tuple(values["evaluation_seeds"])

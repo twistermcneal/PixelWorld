@@ -113,3 +113,21 @@ neuen 8-Latent-Zielwelten. Die Datei
 `seed_matched_benchmark_deltas.csv` vergleicht A und B–E daher nur nach gleichem
 Trainingsseed. Sie enthält keine gepaarten Target-Welt-Differenzen. Statistisch
 gemeinsam erzeugte Target-Welten dürfen ausschließlich für B–E behauptet werden.
+
+## Isolierte Split-Query-Ablation
+
+`D-SPLIT-MEASURE` (`--gradient-mode split-measure`) besitzt eine eigene trainierbare
+`placement_slot_queries`-Matrix, während `slot_queries.weight` exklusiv dem
+Attributpfad gehört. Die Placement-Matrix wird nach der vollständigen bisherigen
+Modellinitialisierung ohne weiteren Zufallszug als bitgenauer Klon angelegt. Damit
+bleiben alle bisherigen Parameter und Forward-Werte vor dem Training identisch zu D.
+Die Parameterzahl steigt ausschließlich um `8 * 320 = 2.560`.
+
+Der Modus misst, projiziert aber keine Gradienten. Er protokolliert
+Region-vs.-Anchor, Offset-vs.-Region, Offset-vs.-Anchor und
+Offset-vs.-kombiniertem Region+Anchor getrennt für Placement-Encoder,
+Placement-Decoder, Placement-Queries und den Gesamtpfad. Dazu kommen negative
+Konfliktraten und aufgabenspezifische Gradientennormen. Checkpoints tragen
+`split_placement_queries=true` und eine versionierte `query_schema_version`; sie
+sind nicht mit D-, PCGrad- oder QDET-Checkpoints austauschbar. Vollständige
+Trainingsläufe bedürfen einer gesonderten Freigabe.

@@ -8,7 +8,10 @@ from .config import CONDITION_DIM, OFFSET_VARIANTS, VARIANTS
 
 
 class LandscapeNet062(LandscapeNet):
-    def __init__(self, variant, condition_dim=CONDITION_DIM, hidden=320, detach_placement_queries=False):
+    def __init__(
+        self, variant, condition_dim=CONDITION_DIM, hidden=320,
+        detach_placement_queries=False, split_placement_queries=False,
+    ):
         if variant not in OFFSET_VARIANTS:
             raise ValueError(f"LandscapeNet062 requires an offset variant, got {variant!r}")
         super().__init__(condition_dim=condition_dim, hidden=hidden)
@@ -17,14 +20,20 @@ class LandscapeNet062(LandscapeNet):
         self.offset_head = nn.Linear(hidden, 2)
         if variant == "E":
             self.xy_auxiliary_head = nn.Linear(hidden, 2)
+        self.split_placement_queries = bool(split_placement_queries)
+        if self.split_placement_queries:
+            self.placement_slot_queries = nn.Parameter(
+                self.slot_queries.weight.detach().clone()
+            )
 
     def forward(self, x):
         terrain = self.terrain_encoder(x)
-        placement_queries = (
-            self.slot_queries.weight.detach()
-            if self.detach_placement_queries
-            else self.slot_queries.weight
-        )
+        if self.split_placement_queries:
+            placement_queries = self.placement_slot_queries
+        elif self.detach_placement_queries:
+            placement_queries = self.slot_queries.weight.detach()
+        else:
+            placement_queries = self.slot_queries.weight
         placement = self.slots_for(
             self.placement_encoder(x), self.placement_decoder, queries=placement_queries
         )
@@ -47,11 +56,15 @@ class LandscapeNet062(LandscapeNet):
         return outputs
 
 
-def create_model(variant, detach_placement_queries=False):
+def create_model(variant, detach_placement_queries=False, split_placement_queries=False):
     if variant not in VARIANTS:
         raise ValueError(f"Unknown placement variant: {variant!r}")
     if variant == "A":
         return LandscapeNet()
     if variant == "B":
         return LandscapeNet(condition_dim=CONDITION_DIM)
-    return LandscapeNet062(variant, detach_placement_queries=detach_placement_queries)
+    return LandscapeNet062(
+        variant,
+        detach_placement_queries=detach_placement_queries,
+        split_placement_queries=split_placement_queries,
+    )

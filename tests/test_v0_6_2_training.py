@@ -8,7 +8,11 @@ from pixelworld import cli
 from pixelworld.evaluation import METRIC_NAMES
 from pixelworld.training import seed_everything
 from pixelworld.config import DEFAULT_EVALUATION_SEEDS
-from pixelworld.versions.v0_6_2.config import SHARED_TARGET_SHA256, PlacementConfig
+from pixelworld.versions.v0_6_2.config import (
+    SHARED_TARGET_SHA256,
+    SPLIT_QUERY_SCHEMA_VERSION,
+    PlacementConfig,
+)
 from pixelworld.versions.v0_6_2.model import create_model
 from pixelworld.versions.v0_6_2.study import (
     _validate_completed_v062_run,
@@ -240,6 +244,71 @@ def test_qdet_modes_isolate_foreign_parameters_after_one_batch():
             assert torch.equal(left[name], right[name]), name
 
 
+def test_split_query_initialization_and_forward_parity_without_rng_drift():
+    seed_everything(42)
+    baseline = create_model("D")
+    seed_everything(42)
+    split = create_model("D", split_placement_queries=True)
+    for name, tensor in baseline.state_dict().items():
+        assert torch.equal(tensor, split.state_dict()[name]), name
+    assert torch.equal(split.slot_queries.weight, split.placement_slot_queries)
+    assert sum(p.numel() for p in split.parameters()) - sum(p.numel() for p in baseline.parameters()) == 8 * 320
+    x = torch.randn(3, 81)
+    baseline.eval(); split.eval()
+    for left, right in zip(baseline(x), split(x)):
+        assert torch.equal(left, right)
+
+
+def test_split_queries_have_bidirectional_gradient_isolation():
+    model = create_model("D", split_placement_queries=True)
+    x = torch.randn(2, 81)
+    outputs = model(x)
+    (outputs[3].sum() + outputs[4].sum() + outputs[9].sum()).backward()
+    assert model.placement_slot_queries.grad is not None
+    assert model.slot_queries.weight.grad is None
+    model.zero_grad(set_to_none=True)
+    outputs = model(x)
+    (outputs[6].sum() + outputs[7].sum() + outputs[8].sum()).backward()
+    assert model.slot_queries.weight.grad is not None
+    assert model.placement_slot_queries.grad is None
+
+
+def test_split_query_paths_do_not_change_each_others_raw_outputs():
+    seed_everything(42)
+    original = create_model("D", split_placement_queries=True).eval()
+    changed = create_model("D", split_placement_queries=True).eval()
+    changed.load_state_dict(original.state_dict())
+    x = torch.randn(2, 81)
+    with torch.no_grad():
+        changed.placement_slot_queries.add_(1.0)
+        before, after = original(x), changed(x)
+    for index in (5, 6, 7, 8):
+        assert torch.equal(before[index], after[index])
+    changed.load_state_dict(original.state_dict())
+    with torch.no_grad():
+        changed.slot_queries.weight.add_(1.0)
+        before, after = original(x), changed(x)
+    for index in (3, 4, 9):
+        assert torch.equal(before[index], after[index])
+
+
+def test_split_measure_records_finite_pairwise_conflicts():
+    cfg = gradient_config("split-measure")
+    objects = initialize_training(cfg, "cpu", progress=None)
+    record = train_one_epoch(objects, cfg, "cpu")
+    expected = (
+        "gradient_total_offset_region_cosine_mean",
+        "gradient_total_offset_anchor_cosine_mean",
+        "gradient_total_region_anchor_cosine_mean",
+        "gradient_total_offset_discrete_cosine_mean",
+        "gradient_queries_offset_discrete_negative_rate",
+        "gradient_encoder_region_norm_mean",
+        "gradient_decoder_anchor_norm_mean",
+        "gradient_queries_offset_norm_mean",
+    )
+    assert all(torch.isfinite(torch.tensor(record[name])) for name in expected)
+
+
 def test_variant_e_auxiliary_head_updates_placement_path():
     model = create_model("E")
     model(torch.zeros(2, 81))[10].sum().backward()
@@ -303,6 +372,25 @@ def test_qdet_checkpoint_records_semantics_and_rejects_other_mode(tmp_path):
         load_checkpoint(store.path / "final.pt", gradient_config("qdet-pcgrad"), "cpu")
 
 
+def test_split_checkpoint_records_schema_and_rejects_non_split(tmp_path):
+    cfg = gradient_config("split-measure")
+    store = PlacementRunStore.create(tmp_path, cfg, "checkpoint-split-measure")
+    run_training(store, device="cpu")
+    model, payload = load_checkpoint(store.path / "final.pt", cfg, "cpu")
+    assert payload["gradient_mode"] == "split-measure"
+    assert payload["split_placement_queries"] is True
+    assert payload["query_schema_version"] == SPLIT_QUERY_SCHEMA_VERSION
+    assert payload["model_parameters"] == sum(p.numel() for p in model.parameters())
+    assert payload["shared_target_sha256"] == SHARED_TARGET_SHA256
+    with pytest.raises(ValueError, match="gradient mode"):
+        load_checkpoint(store.path / "final.pt", gradient_config("measure"), "cpu")
+    payload["query_schema_version"] = SPLIT_QUERY_SCHEMA_VERSION + 1
+    incompatible = tmp_path / "incompatible-split-schema.pt"
+    torch.save(payload, incompatible)
+    with pytest.raises(ValueError, match="query schema"):
+        load_checkpoint(incompatible, cfg, "cpu")
+
+
 def test_gradient_mode_resume_parity_including_statistics(tmp_path):
     cfg = gradient_config("pcgrad", epochs=2)
     continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-pcgrad")
@@ -325,6 +413,23 @@ def test_qdet_resume_parity_including_statistics(tmp_path):
     continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-qdet")
     run_training(continuous, device="cpu")
     resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-qdet")
+    run_training(resumed, device="cpu", stop_after_epoch=1)
+    run_training(resumed, device="cpu", resume=True)
+    left = torch.load(continuous.path / "final.pt", weights_only=True)
+    right = torch.load(resumed.path / "final.pt", weights_only=True)
+    assert all(torch.equal(left["model_state_dict"][name], tensor)
+               for name, tensor in right["model_state_dict"].items())
+    for a, b in zip(left["training_history"], right["training_history"]):
+        assert {k:v for k,v in a.items() if k != "epoch_seconds"} == {
+            k:v for k,v in b.items() if k != "epoch_seconds"
+        }
+
+
+def test_split_resume_parity_including_conflict_statistics(tmp_path):
+    cfg = gradient_config("split-measure", epochs=2)
+    continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-split")
+    run_training(continuous, device="cpu")
+    resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-split")
     run_training(resumed, device="cpu", stop_after_epoch=1)
     run_training(resumed, device="cpu", resume=True)
     left = torch.load(continuous.path / "final.pt", weights_only=True)
@@ -375,6 +480,8 @@ def test_cli_variant_selection_and_invalid_variant():
     assert args.gradient_mode == "pcgrad"
     args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "qdet-pcgrad"])
     assert args.gradient_mode == "qdet-pcgrad"
+    args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "split-measure"])
+    assert args.gradient_mode == "split-measure"
     with pytest.raises(SystemExit):
         parser.parse_args(["train", "--version", "0.6.2", "--variant", "Z"])
 

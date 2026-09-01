@@ -35,6 +35,7 @@ from pixelworld.training import masked_ce, ordinal_loss, resolve_device, seed_ev
 from .config import (
     LAYOUT_DIM,
     SHARED_TARGET_SHA256,
+    SPLIT_QUERY_SCHEMA_VERSION,
     SLOT_LATENT_DIM,
     PlacementConfig,
     STUDY_NAME,
@@ -185,6 +186,27 @@ CONFLICT_METRIC_FIELDS = (
     "gradient_decoder_cosine_mean",
 )
 
+SPLIT_CONFLICT_GROUPS = ("encoder", "decoder", "queries", "total")
+SPLIT_CONFLICT_PAIRS = (
+    ("offset_region", "offset", "region"),
+    ("offset_anchor", "offset", "anchor"),
+    ("region_anchor", "region", "anchor"),
+    ("offset_discrete", "offset", "discrete"),
+)
+SPLIT_CONFLICT_METRIC_FIELDS = tuple(
+    field
+    for group in SPLIT_CONFLICT_GROUPS
+    for pair, _, _ in SPLIT_CONFLICT_PAIRS
+    for field in (
+        f"gradient_{group}_{pair}_cosine_mean",
+        f"gradient_{group}_{pair}_negative_rate",
+    )
+) + tuple(
+    f"gradient_{group}_{task}_norm_mean"
+    for group in SPLIT_CONFLICT_GROUPS
+    for task in ("region", "anchor", "offset", "discrete")
+)
+
 
 def project_conflicting_gradients(discrete, offset, project=False, eps=1e-12):
     """Measure and optionally project offset gradients without mutating inputs."""
@@ -270,6 +292,51 @@ def gradient_conflict_backward(model, losses, project=False):
     return stats
 
 
+def split_gradient_conflict_backward(model, losses):
+    """Measure all placement-task conflicts without projecting any gradient."""
+    groups = (
+        ("encoder", tuple(model.placement_encoder.parameters())),
+        ("decoder", tuple(model.placement_decoder.parameters())),
+        ("queries", (model.placement_slot_queries,)),
+    )
+    shared = tuple(parameter for _, parameters in groups for parameter in parameters)
+    task_losses = {
+        "region": 2.0 * losses["region_loss"],
+        "anchor": 2.0 * losses["anchor_loss"],
+        "offset": losses["offset_loss"],
+    }
+    gradients = {
+        name: torch.autograd.grad(value, shared, retain_graph=True, allow_unused=True)
+        for name, value in task_losses.items()
+    }
+    gradients["discrete"] = tuple(
+        (None if gr is None and ga is None else
+         (torch.zeros_like(ga) if gr is None else gr) +
+         (torch.zeros_like(gr) if ga is None else ga))
+        for gr, ga in zip(gradients["region"], gradients["anchor"])
+    )
+    stats = {}
+    slices = []
+    index = 0
+    for group, parameters in groups:
+        slices.append((group, slice(index, index + len(parameters))))
+        index += len(parameters)
+    slices.append(("total", slice(0, len(shared))))
+    for group, selected in slices:
+        for pair, left, right in SPLIT_CONFLICT_PAIRS:
+            _, pair_stats = project_conflicting_gradients(
+                gradients[left][selected], gradients[right][selected], project=False
+            )
+            stats[f"{group}_{pair}_cosine"] = pair_stats["cosine"]
+            stats[f"{group}_{pair}_negative"] = pair_stats["negative"]
+        for task in ("region", "anchor", "offset", "discrete"):
+            values = [gradient for gradient in gradients[task][selected] if gradient is not None]
+            squared = sum(gradient.square().sum() for gradient in values)
+            stats[f"{group}_{task}_norm"] = float(squared.sqrt()) if values else 0.0
+    losses["loss"].backward()
+    return stats
+
+
 def summarize_conflict_batches(records):
     cosine = np.asarray([item["cosine"] for item in records], dtype=np.float64)
     def mean(name):
@@ -296,6 +363,24 @@ def summarize_conflict_batches(records):
     }
 
 
+def summarize_split_conflict_batches(records):
+    result = {}
+    for group in SPLIT_CONFLICT_GROUPS:
+        for pair, _, _ in SPLIT_CONFLICT_PAIRS:
+            prefix = f"{group}_{pair}"
+            result[f"gradient_{prefix}_cosine_mean"] = float(
+                np.mean([item[f"{prefix}_cosine"] for item in records])
+            )
+            result[f"gradient_{prefix}_negative_rate"] = float(
+                np.mean([item[f"{prefix}_negative"] for item in records])
+            )
+        for task in ("region", "anchor", "offset", "discrete"):
+            result[f"gradient_{group}_{task}_norm_mean"] = float(
+                np.mean([item[f"{group}_{task}_norm"] for item in records])
+            )
+    return result
+
+
 @dataclass
 class TrainingObjects:
     model: nn.Module
@@ -314,7 +399,9 @@ def initialize_training(config, device, progress=print):
         raise ValueError("Variant A must use the frozen PixelWorld 0.6.1 training path")
     seed_everything(config.seed)
     model = create_model(
-        config.variant, detach_placement_queries=config.detaches_placement_queries
+        config.variant,
+        detach_placement_queries=config.detaches_placement_queries,
+        split_placement_queries=config.splits_placement_queries,
     ).to(device)
     started = time.perf_counter()
     dataset = LandscapeDataset062(config.samples, config.offset_radius, progress)
@@ -369,7 +456,9 @@ def train_one_epoch(objects, config, device):
             objects.bce,
         )
         objects.optimizer.zero_grad()
-        if config.measures_gradient_conflicts:
+        if config.splits_placement_queries:
+            conflict_batches.append(split_gradient_conflict_backward(objects.model, losses))
+        elif config.measures_gradient_conflicts:
             conflict_batches.append(
                 gradient_conflict_backward(
                     objects.model, losses, project=config.projects_gradient_conflicts
@@ -390,7 +479,11 @@ def train_one_epoch(objects, config, device):
         "learning_rate": objects.optimizer.param_groups[0]["lr"],
     }
     if conflict_batches:
-        result.update(summarize_conflict_batches(conflict_batches))
+        result.update(
+            summarize_split_conflict_batches(conflict_batches)
+            if config.splits_placement_queries
+            else summarize_conflict_batches(conflict_batches)
+        )
     return result
 
 
@@ -456,7 +549,7 @@ HISTORY_FIELDS = (
     "trigger_loss",
     "epoch_seconds",
     "learning_rate",
-) + CONFLICT_METRIC_FIELDS
+) + CONFLICT_METRIC_FIELDS + SPLIT_CONFLICT_METRIC_FIELDS
 
 
 def write_history(store, history):
@@ -476,6 +569,11 @@ def checkpoint_payload(objects, config, history, completed_epochs, timings, prov
         "variant": config.variant,
         "gradient_mode": config.gradient_mode,
         "detach_placement_queries": config.detaches_placement_queries,
+        "split_placement_queries": config.splits_placement_queries,
+        "query_schema_version": (
+            SPLIT_QUERY_SCHEMA_VERSION if config.splits_placement_queries else None
+        ),
+        "model_parameters": sum(parameter.numel() for parameter in objects.model.parameters()),
         "slot_latent_dim": SLOT_LATENT_DIM,
         "layout_dim": LAYOUT_DIM,
         "offset_radius": config.offset_radius,
@@ -504,8 +602,15 @@ def load_checkpoint(path, config, device, with_optimizer=False):
         raise ValueError("Checkpoint gradient mode is incompatible with the requested run")
     if payload.get("detach_placement_queries", False) != config.detaches_placement_queries:
         raise ValueError("Checkpoint query-detach semantics are incompatible with the requested run")
+    if payload.get("split_placement_queries", False) != config.splits_placement_queries:
+        raise ValueError("Checkpoint split-query semantics are incompatible with the requested run")
+    expected_schema = SPLIT_QUERY_SCHEMA_VERSION if config.splits_placement_queries else None
+    if payload.get("query_schema_version") != expected_schema:
+        raise ValueError("Checkpoint query schema is incompatible with the requested run")
     model = create_model(
-        config.variant, detach_placement_queries=config.detaches_placement_queries
+        config.variant,
+        detach_placement_queries=config.detaches_placement_queries,
+        split_placement_queries=config.splits_placement_queries,
     ).to(device)
     model.load_state_dict(payload["model_state_dict"])
     model.eval()
@@ -556,6 +661,11 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
                 raise ValueError("Incompatible recovery checkpoint gradient mode")
             if payload.get("detach_placement_queries", False) != config.detaches_placement_queries:
                 raise ValueError("Incompatible recovery checkpoint query-detach semantics")
+            if payload.get("split_placement_queries", False) != config.splits_placement_queries:
+                raise ValueError("Incompatible recovery checkpoint split-query semantics")
+            expected_schema = SPLIT_QUERY_SCHEMA_VERSION if config.splits_placement_queries else None
+            if payload.get("query_schema_version") != expected_schema:
+                raise ValueError("Incompatible recovery checkpoint query schema")
             if payload.get("slot_latent_dim") != SLOT_LATENT_DIM or payload.get("layout_dim") != LAYOUT_DIM:
                 raise ValueError("Incompatible recovery checkpoint latent schema")
             objects.model.load_state_dict(payload["model_state_dict"])
