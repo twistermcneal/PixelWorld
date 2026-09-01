@@ -1,120 +1,106 @@
-# PixelWorld 0.6.3 Phase 2: OpenAI-kompatibler Story Director
+# PixelWorld 0.6.3: OpenAI-kompatibler Story Director
 
 ## Vertrauensgrenze
 
-Der Story Director ist eine nicht vertrauenswürdige Datenquelle. Er darf ausschließlich eine `AdventureSpec` vorschlagen. Compiler, Theme-Template, State-Schema, Geometrievalidator, Solver, Python-Runtime und JavaScript-Runtime bleiben die Autorität. Modelltext wird niemals als Python, JavaScript, Shell, Template oder Ausdruck ausgeführt.
-
-Die Pipeline akzeptiert eine Modellantwort erst nach diesen Gates:
+Der Story Director ist eine nicht vertrauenswürdige Datenquelle. Er liefert ausschließlich Daten. Compiler, internes `AdventureSpec`, Theme-Templates, Validator, Solver sowie Python- und JavaScript-Runtime bleiben unverändert die Autorität. Modelltext wird nie als Code, Ausdruck oder Template ausgeführt.
 
 ```text
-striktes Einzelobjekt-JSON
-→ validate_adventure_spec
-→ compile_adventure
-→ validate_game
-→ begrenzter State-Space-Solver
+Provider-WireSpec v1
+→ striktes Einzelobjekt-JSON
+→ deterministische WireSpec-zu-AdventureSpec-Transformation
+→ unveränderte AdventureSpec-Validierung
+→ Compiler → Game-Validator → Solver
 → atomarer Export
 ```
 
-Ein sprachlich überzeugendes Modellresultat ist kein Ersatz für Validierung und Solver: Nur diese beweisen referenzielle Integrität, unterstützte Klassen/Zonen, typisierte Zustände, erreichbare Hotspots und einen tatsächlich ausführbaren Lösungsweg.
+## Explizite Konfiguration
 
-## Konfiguration
-
-Der Director wählt keinen Provider automatisch. Er verwendet explizit das OpenAI-kompatible Responses-v1-Protokoll und `POST <BASE_URL>/responses`. `BASE_URL` ist der API-Root, beispielsweise `https://api.example.test/v1`, nicht bereits der `/responses`-Endpunkt.
-
-Konfiguration erfolgt per CLI oder Umgebungsvariablen:
+Es gibt keine Protokollerkennung und keinen Fallback. Neben Base-URL, API-Key und Modell muss genau ein Protokoll gesetzt werden:
 
 ```powershell
-$env:PIXELWORLD_LLM_BASE_URL = "https://api.example.test/v1"
+$env:PIXELWORLD_LLM_BASE_URL = "http://gx10.example:8000/v1"
 $env:PIXELWORLD_LLM_API_KEY = "..."
 $env:PIXELWORLD_LLM_MODEL = "explicit-model-id"
-
-python -m pixelworld.cli adventure-generate `
-  --version 0.6.3 `
-  --director openai-compatible `
-  --prompt "Ein tollpatschiger Erfinder muss vor Mitternacht ein Zeitportal reparieren" `
-  --output outputs/adventures/my-game
+$env:PIXELWORLD_LLM_PROTOCOL = "chat-completions-json-schema"
 ```
 
-Alternativ existieren `--llm-base-url`, `--llm-api-key` und `--llm-model`. Für den Schlüssel ist die Umgebungsvariable vorzuziehen, damit er nicht in Shell-Historie oder Prozessargumenten erscheint. Die Base-URL muss `http` oder `https`, einen expliziten Host und keine Credentials, Query oder Fragment besitzen. Redirects werden nicht verfolgt. Connect-, Read- und Gesamttimeout sowie Antwortgrößen sind begrenzt.
+Erlaubt sind:
 
-Phase 2 erlaubt nur die bereits kompilierbaren Themes:
+- `responses-v1`: `POST <BASE_URL>/responses`
+- `chat-completions-json-schema`: `POST <BASE_URL>/chat/completions`
 
-- `mad_scientist_lab`
-- `pirate_harbor`
+Dieselben Werte lassen sich über `--llm-base-url`, `--llm-api-key`, `--llm-model` und `--llm-protocol` setzen. Für den Schlüssel ist die Umgebungsvariable vorzuziehen. Redirects werden nicht verfolgt; URL, Antwortgröße sowie Connect-, Read- und harter Gesamttimeout sind begrenzt.
 
-Die übrigen Ontologie-Themes bleiben gesperrt, bis ein deterministisches Layouttemplate existiert.
+Für den ersten Smoke gegen den derzeitigen GX10-vLLM-Server ist `chat-completions-json-schema` zu verwenden. Dieser Pfad erwartet eine Chat-Template-fähige Textgeneration und extrahiert ausschließlich `choices[0].message.content`. Aktuelle vLLM-Versionen dokumentieren zwar zusätzlich eine Responses API, deren tatsächliche Verfügbarkeit und Structured-Output-Unterstützung hängt aber von der installierten Serverversion und dem Modell ab. `responses-v1` darf deshalb auf dem GX10 erst nach einem erfolgreichen expliziten Preflight gewählt werden. Die aktuelle offizielle vLLM-Dokumentation führt beide Endpunkte auf: [OpenAI-Compatible Server](https://docs.vllm.ai/en/latest/serving/online_serving/openai_compatible_server/).
 
-## Requestvertrag
+## Protokollverträge
 
-Der Request entspricht der offiziellen OpenAI-Responses-Konvention für Structured Outputs:
+`responses-v1` folgt dem offiziellen [OpenAI Responses API](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)-Vertrag: Systemgrenze in `instructions`, Prämisse in `input`, Schema in `text.format` mit `type: "json_schema"`, außerdem `store: false` und `stream: false`. Akzeptiert wird entweder ein alleinstehendes nichtleeres `output_text` oder exakt ein `output[].content[]`-Element vom Typ `output_text`; mehrere Outputtexte werden abgewiesen.
+
+`chat-completions-json-schema` sendet exakt:
 
 ```json
 {
   "model": "<explizite Modell-ID>",
-  "instructions": "<fester Story-Director-Systemprompt>",
-  "input": [
-    {
-      "role": "user",
-      "content": [{"type": "input_text", "text": "<Storyidee>"}]
-    }
+  "messages": [
+    {"role": "system", "content": "<fester Story-Director-Prompt>"},
+    {"role": "user", "content": "<Prämisse oder Repair-Daten>"}
   ],
-  "text": {
-    "format": {
-      "type": "json_schema",
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
       "name": "pixelworld_adventure_spec_0_6_3",
       "strict": true,
-      "schema": "<vollständiges AdventureSpec-JSON-Schema>"
+      "schema": "<Provider-WireSpec-v1-Schema>"
     }
   },
-  "max_output_tokens": 12000,
-  "store": false,
   "stream": false
 }
 ```
 
-Der feste Prompt erklärt, dass Benutzertext nur eine Prämisse ist. Er übergibt erlaubte Themes, Klassen, Rollen, Zonen, Verben, Operatoren und Limits, enthält aber kein vollständiges Golden-Fixture. Geschützte Figuren und kopierte Dialoge werden ausdrücklich ausgeschlossen.
+Der Response-Envelope muss genau eine Choice mit nichtleerem stringförmigem `message.content` enthalten. Mehrere Choices, Refusals ohne Content und falsche Envelopes werden abgewiesen. Repair-Requests bleiben immer auf dem konfigurierten Protokoll.
 
-Der Authorization-Header existiert nur im flüchtigen Transportrequest. Er wird weder geloggt noch gespeichert, gehasht oder in Fehlermeldungen aufgenommen.
+## Internes Schema und Provider-WireSpec
 
-## Responsevertrag
+`adventure_spec_json_schema()` beschreibt weiterhin das vollständige interne Datenmodell. Es enthält absichtlich Ausdrucksmittel wie `propertyNames`, Tupel über `prefixItems`, schemawertige `additionalProperties` und skalare `anyOf`-Zweige. Diese sind für die interne Validierung richtig, aber nicht als gemeinsamer Strict-Structured-Output-Subset aller Provider zuverlässig.
 
-Der HTTP-Envelope muss JSON sein und entweder genau ein stringförmiges `output_text` oder genau einen Content-Eintrag mit `type: "output_text"` enthalten. Dieser Text muss nach optionalem äußerem Whitespace exakt ein JSON-Objekt sein.
+Das gesendete, versionierte `pixelworld-adventure-wire-1` verwendet daher einen konservativen gemeinsamen Subset. `validate_provider_schema()` prüft ihn vor jedem Request programmgesteuert. Zugelassen sind nur Objekte mit vollständigem `required`, `additionalProperties: false`, begrenzte homogene Arrays, primitive Typen, `enum`, `const`, String- und Zahlenlimits. `propertyNames`, `prefixItems`, `anyOf` und schemawertige zusätzliche Properties kommen nicht vor.
 
-Abgewiesen werden insbesondere Markdown-Fences, Prosa, Suffixtext, mehrere Dokumente, Arrays, NaN/Infinity, mehr als 128 KiB Modelltext, mehr als 20 JSON-Ebenen, mehr als 10.000 Knoten sowie jede Verletzung von Spec, Ontologie, Template, Compiler, Validator oder Solver. Es gibt keine Reparaturheuristik, JSON-Extraktion oder tolerante Dekodierung.
+Dynamische Zustände werden als begrenzte Liste eindeutiger Namen übertragen. Skalare Werte haben eine diskriminierte, aber unionsfreie Form:
 
-Die maschinenlesbare Schemafunktion liegt in `pixelworld/adventure/structured_schema.py`. Sie begrenzt Listen und Texte und weist unbekannte Felder über `additionalProperties: false` ab. Dynamische `initial_state`-Felder sind ausschließlich begrenzte skalare Deklarationen; Bedingungen und Effekte dürfen danach nur exakt diese Felder und Typen verwenden.
+```json
+{
+  "name": "taken",
+  "type": "boolean",
+  "boolean_value": false,
+  "string_value": "",
+  "integer_value": 0,
+  "number_value": 0.0
+}
+```
 
-## Begrenzter Repair-Loop
+Feste interne Werte werden auf dem Wire nicht kreativ generiert: `schema_version` wird aus der Wire-Version abgeleitet, Raumgröße `128×72` ergänzt, Spielerposition als `{x,y}` übertragen und ein leeres Portalziel deterministisch zu `null` transformiert. Round-trip-Tests beweisen für beide synthetischen Abenteuer die identische Rückgewinnung des internen `AdventureSpec`. Runtime-Semantik ändert sich dadurch nicht.
 
-Eine bereits gültige und lösbare erste Antwort erzeugt keinen zweiten Request. Bei einem Decode-, Spec-, Compiler-, Validator- oder Solverfehler folgt genau ein Reparaturrequest. Er enthält nur:
+## Schema-Preflight
 
-- die vorherige Modellantwort,
-- höchstens acht bereinigte Fehler mit jeweils maximal 240 Zeichen,
-- die Aufforderung, ein vollständiges korrigiertes JSON-Objekt zurückzugeben.
+Der Check erzeugt keinen Spielordner und keine Adventure-Ausgabe:
 
-Transportfehler, Timeouts, Redirects und Größenüberschreitungen werden nicht durch einen zweiten Netzwerkversuch kaschiert. Scheitert auch die Reparatur, endet die Pipeline verständlich und ohne Zielordner. Stacktraces, lokale Pfade, Request-Header und Secrets werden nicht an das Modell gesendet.
+```powershell
+python -m pixelworld.cli adventure-director-check `
+  --version 0.6.3 `
+  --llm-protocol chat-completions-json-schema
+```
 
-## Provenienz
+Er berichtet getrennt über gültige Base-URL, explizites Modell, Erreichbarkeit, Modellfund in `/models` sofern unterstützt, Existenz des gewählten Protokollendpunkts und Annahme des tatsächlich verwendeten WireSpec-Schemas. Der POST fordert lediglich eine feste, minimale, begrenzte Schema-Probe an; er kompiliert kein Spiel und schreibt nichts nach `outputs/`. HTTP 404 und 400 bleiben unterscheidbar. Der Check erkennt oder wechselt das Protokoll nie automatisch.
 
-Nur ein erfolgreicher OpenAI-kompatibler Lauf erzeugt `director_provenance.json`:
+## Repair, Limits und Provenienz
 
-- Schema-Version und Director-Typ
-- `openai-responses-v1` als Providerprotokoll
-- explizite Modell-ID
-- sanitierte Base-URL
-- SHA-256 des Benutzerprompts
-- SHA-256 jedes rohen `output_text`
-- Versuchszahl und begrenzter Validierungsstatus je Versuch
-- Compile-Digest
-- UTC-Zeitpunkt und Python-Version
-- Git-Commit und Dirty-Status, wenn zuverlässig ermittelbar
+Nach Decode-, Transformations-, Spec-, Compiler-, Validator- oder Solverfehler gibt es genau einen Repair-Request mit der vorherigen Rohantwort und höchstens acht bereinigten Fehlern zu je 240 Zeichen. Transportfehler, Redirects, Timeouts und Größenfehler werden nicht wiederholt. Nach zwei ungültigen Antworten bleibt der Zielordner aus.
 
-API-Key, Authorization-Header, vollständige Header, URLs mit Credentials, Modell-Reasoning und Chain-of-Thought werden nicht persistiert. Ungültige Antworten werden standardmäßig überhaupt nicht unter `outputs/` gespeichert.
+Der Transport verwendet keine privaten `urllib`-Attribute. `http.client` und öffentliche Socket-Timeouts trennen Connect und Read; eine äußere Deadline erzwingt zusätzlich den harten Total-Timeout auch bei langsam tröpfelnden Antworten.
 
-## Offline-Teststrategie
+Nur erfolgreiche Modellläufe schreiben `director_provenance.json`. Gespeichert werden unter anderem das tatsächlich gewählte Protokoll (`responses-v1` oder `chat-completions-json-schema`), Modell, sanitierte Base-URL, Prompt-/Response-Hashes, Versuchszahl, Compile-Digest, Zeit, Python- und Git-Identität. API-Key, Authorization-Header, Rohantwort, Reasoning und Response-Body eines Fehlers werden nie persistiert oder in Exceptions übernommen.
 
-Automatisierte Tests verwenden ausschließlich einen injizierten `FakeTransport`. Sie prüfen Erfolg, Reparatur, endgültigen Abbruch, striktes JSON, Theme-/Template-Grenzen, Unlösbarkeit, Timeout, HTTP-Fehler, Redirect, Antwortgröße, Konfiguration und Secret-Leaks. Fixture- und JSON-Director werden zusätzlich unter einem verbotenen HTTP-Transport ausgeführt, um ihre Netzwerkfreiheit zu beweisen.
+## Offline-Tests
 
-Zwei neue synthetische Modellantworten – Lyras Mitternachtswerkstatt und der Sturmpier – durchlaufen Schema, Compiler, Validator, Solver, Python-Replay, schrittweisen Node-Paritätsvergleich und Browserexport. In Entwicklung und Abschlussprüfung wurde kein echter externer API-Aufruf ausgeführt.
-
-Die Requestform orientiert sich an der offiziellen [Responses API](https://developers.openai.com/api/reference/cli/resources/responses/methods/create) und deren [Structured-Outputs-Format](https://platform.openai.com/docs/api-reference/responses-streaming/response/web_search_call?lang=curl).
+Alle Providerpfade werden mit injizierten Fake-Transporten geprüft. Lokale HTTP-Testserver decken Read-Timeout, harten Total-Timeout unter Tröpfelantworten, Redirect und Größenlimit ab. Beide synthetischen Abenteuer laufen weiterhin durch Compiler, Validator, Solver, Python-Replay, schrittweisen Node-Paritätsvergleich und Browserexport. In dieser Phase wurde kein GX10- oder sonstiger externer Modellaufruf durchgeführt.

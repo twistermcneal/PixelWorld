@@ -15,7 +15,7 @@ python -m pixelworld.cli adventure-validate --spec outputs/adventures/0.6.3-gold
 python -m pixelworld.cli adventure-solve --game outputs/adventures/0.6.3-golden-lab/game.json
 ```
 
-Phase 2 ergänzt einen echten, aber standardmäßig nicht konfigurierten OpenAI-kompatiblen Story Director. Er verwendet ausschließlich strukturierte AdventureSpec-Ausgaben; Compiler, Validator und Solver bleiben die Autorität. Konfiguration, Requestvertrag, Repair-Loop und Secret-Schutz stehen in [`docs/pixelworld-0.6.3-openai-compatible-director.md`](docs/pixelworld-0.6.3-openai-compatible-director.md). Die Teststrategie führt keine externen Modellaufrufe aus.
+Phase 2 ergänzt einen echten, aber standardmäßig nicht konfigurierten OpenAI-kompatiblen Story Director. Das Protokoll muss explizit als `responses-v1` oder `chat-completions-json-schema` gewählt werden; es gibt keinen Fallback. Ein providerfreundliches WireSpec wird deterministisch in das unveränderte interne AdventureSpec transformiert, bevor Compiler, Validator und Solver übernehmen. Mit `adventure-director-check` lässt sich Endpoint-, Modell- und Schema-Kompatibilität ohne Spielausgabe vorprüfen. Konfiguration, Requestverträge, Repair-Loop und Secret-Schutz stehen in [`docs/pixelworld-0.6.3-openai-compatible-director.md`](docs/pixelworld-0.6.3-openai-compatible-director.md). Die Teststrategie führt keine externen Modellaufrufe aus.
 
 **Reproduzierbare Forschungsbasis: Version 0.6.1 – Terrainregionen und Vegetation**
 

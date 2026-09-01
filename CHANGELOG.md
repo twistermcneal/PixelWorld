@@ -3,7 +3,9 @@
 ## 0.6.3
 
 - erster vertikaler Prototyp für strukturierte LLM-zu-Adventure-Erzeugung
-- provider-neutraler OpenAI-kompatibler Responses-v1-Director mit Strict JSON Schema
+- provider-neutraler OpenAI-kompatibler Director mit explizitem Responses-v1- oder Chat-Completions-JSON-Schema-Protokoll ohne Fallback
+- versioniertes providerfreundliches WireSpec mit deterministischer AdventureSpec-Transformation und Schema-Preflight
+- robuster HTTP-Transport mit getrenntem Connect-/Read- und hartem Total-Timeout
 - begrenzter einmaliger Repair-Loop und atomare Director-Provenienz
 - injizierbarer, timeout- und größenbegrenzter HTTP-Transport ohne Redirect-Folgen
 - strikt validierte AdventureSpec, RoomSpec und Scene Graphs
