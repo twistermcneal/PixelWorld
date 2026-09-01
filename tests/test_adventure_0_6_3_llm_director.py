@@ -1,7 +1,10 @@
 import hashlib
+import http.server
 import json
 import shutil
 import subprocess
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -15,9 +18,10 @@ from pixelworld.adventure.director import (
     decode_single_json_object,
 )
 from pixelworld.adventure.pipeline import generate_adventure
+from pixelworld.adventure.preflight import check_story_director
 from pixelworld.adventure.runtime import AdventureRuntime
-from pixelworld.adventure.structured_schema import PHASE2_THEMES, adventure_spec_json_schema, build_system_prompt
-from pixelworld.adventure.transport import ResponseTooLarge, StoryDirectorTransport, TransportError, TransportRedirect, TransportRequest, TransportResponse, TransportTimeout, responses_endpoint, validate_base_url
+from pixelworld.adventure.structured_schema import PHASE2_THEMES, adventure_spec_json_schema, adventure_spec_to_wire, build_system_prompt, minimal_provider_probe_wire, provider_generation_json_schema, validate_provider_schema, wire_to_adventure_spec
+from pixelworld.adventure.transport import HTTPTransport, ResponseTooLarge, StoryDirectorTransport, TransportError, TransportHTTPError, TransportRedirect, TransportRequest, TransportResponse, TransportTimeout, protocol_endpoint, responses_endpoint, validate_base_url
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +41,16 @@ class FakeTransport(StoryDirectorTransport):
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
-        envelope = json.dumps({"output_text": response}, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if isinstance(response, TransportResponse):
+            return response
+        try:
+            parsed = json.loads(response)
+            if isinstance(parsed, dict) and parsed.get("schema_version") == "0.6.3":
+                response = json.dumps(adventure_spec_to_wire(parsed), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        envelope = {"choices": [{"message": {"content": response}}]} if request.url.endswith("/chat/completions") else {"output": [{"content": [{"type": "output_text", "text": response}]}]}
+        envelope = json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode("utf-8")
         return TransportResponse(200, envelope)
 
 
@@ -102,8 +115,12 @@ def raw_spec(spec):
     return json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def director_with(responses, **config_overrides):
-    values = {"base_url": "https://llm.example.test/v1", "api_key": SECRET, "model": "example-model-1"}
+def raw_wire(spec):
+    return json.dumps(adventure_spec_to_wire(spec), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def director_with(responses, protocol="responses-v1", **config_overrides):
+    values = {"base_url": "https://llm.example.test/v1", "api_key": SECRET, "model": "example-model-1", "protocol": protocol}
     values.update(config_overrides)
     transport = FakeTransport(responses)
     return OpenAICompatibleStoryDirector(OpenAICompatibleConfig(**values), transport), transport
@@ -125,7 +142,7 @@ def test_machine_schema_prompt_and_request_contract():
     assert body["store"] is False and body["stream"] is False
     assert body["text"]["format"]["type"] == "json_schema"
     assert body["text"]["format"]["strict"] is True
-    assert body["text"]["format"]["schema"] == schema
+    assert body["text"]["format"]["schema"] == provider_generation_json_schema("responses-v1")
     assert SECRET not in request.body.decode("utf-8")
 
 
@@ -139,9 +156,9 @@ def test_valid_first_response_has_no_repair_and_provenance(tmp_path):
     assert provenance["attempt_count"] == 1
     assert provenance["attempt_validation"] == [{"attempt": 1, "errors": [], "valid": True}]
     assert provenance["prompt_sha256"] == hashlib.sha256(b"repair a midnight machine").hexdigest()
-    assert provenance["response_sha256"] == [hashlib.sha256(raw_spec(spec).encode()).hexdigest()]
+    assert provenance["response_sha256"] == [hashlib.sha256(raw_wire(spec).encode()).hexdigest()]
     assert provenance["compile_digest"] == result["compile_digest"]
-    assert provenance["provider_protocol"] == "openai-responses-v1"
+    assert provenance["provider_protocol"] == "responses-v1"
 
 
 def test_invalid_response_gets_one_bounded_repair():
@@ -242,9 +259,9 @@ def test_invalid_base_urls_are_rejected(url):
 
 def test_missing_model_and_api_key_are_rejected():
     with pytest.raises(ValueError, match="API key"):
-        OpenAICompatibleConfig("https://host/v1", "", "model").validate()
+        OpenAICompatibleConfig("https://host/v1", "", "model", "responses-v1").validate()
     with pytest.raises(ValueError, match="model"):
-        OpenAICompatibleConfig("https://host/v1", SECRET, "").validate()
+        OpenAICompatibleConfig("https://host/v1", SECRET, "", "responses-v1").validate()
 
 
 def test_api_key_never_appears_in_exception_or_artifacts(tmp_path):
@@ -292,3 +309,176 @@ def test_synthetic_model_response_full_python_node_and_browser_export(name, fact
     replay = subprocess.run([node, str(NODE_RUNNER), str(output / "runtime-core.cjs"), str(output / "game.json"), str(output / "solution.json"), str(expected_path)], check=True, capture_output=True, text=True, encoding="utf-8")
     assert json.loads(replay.stdout) == {"success": True, "steps": steps, "completed": True}
     assert (output / "index.html").is_file() and (output / "runtime.js").is_file()
+
+
+@pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
+def test_both_protocols_have_exact_endpoint_body_and_response_extraction(protocol):
+    spec = synthetic_pirate_spec()
+    director, transport = director_with([raw_spec(spec)], protocol=protocol)
+    assert director.create_spec("storm premise") == spec
+    request = transport.requests[0]
+    body = json.loads(request.body)
+    assert request.url == protocol_endpoint("https://llm.example.test/v1", protocol)
+    assert body["model"] == "example-model-1" and body["stream"] is False
+    if protocol == "responses-v1":
+        assert set(body) == {"model", "instructions", "input", "text", "max_output_tokens", "store", "stream"}
+        assert body["text"]["format"] == {"type": "json_schema", "name": "pixelworld_adventure_spec_0_6_3", "strict": True, "schema": provider_generation_json_schema(protocol)}
+        assert body["input"][0]["content"][0]["text"] == "storm premise"
+    else:
+        assert set(body) == {"model", "messages", "response_format", "stream"}
+        assert body["messages"] == [{"role": "system", "content": build_system_prompt()}, {"role": "user", "content": "storm premise"}]
+        assert body["response_format"] == {"type": "json_schema", "json_schema": {"name": "pixelworld_adventure_spec_0_6_3", "strict": True, "schema": provider_generation_json_schema(protocol)}}
+
+
+@pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
+def test_repair_request_uses_same_explicit_protocol_without_fallback(protocol):
+    director, transport = director_with(["{}", raw_spec(synthetic_lab_spec())], protocol=protocol)
+    director.create_spec("idea")
+    assert len(transport.requests) == 2
+    assert all(request.url == protocol_endpoint("https://llm.example.test/v1", protocol) for request in transport.requests)
+    body = json.loads(transport.requests[1].body)
+    repair = body["input"][0]["content"][0]["text"] if protocol == "responses-v1" else body["messages"][1]["content"]
+    assert json.loads(repair)["previous_response"] == "{}"
+
+
+@pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
+def test_protocol_404_never_falls_back(protocol):
+    director, transport = director_with([TransportHTTPError(404)], protocol=protocol)
+    with pytest.raises(TransportHTTPError, match="HTTP 404"):
+        director.create_spec("idea")
+    assert [request.url for request in transport.requests] == [protocol_endpoint("https://llm.example.test/v1", protocol)]
+
+
+@pytest.mark.parametrize("protocol,envelope", [
+    ("responses-v1", {"output": [{"content": [{"type": "output_text", "text": "{}"}, {"type": "output_text", "text": "{}"}]}]}),
+    ("chat-completions-json-schema", {"choices": [{"message": {"content": "{}"}}, {"message": {"content": "{}"}}]}),
+    ("responses-v1", {"output": []}),
+    ("chat-completions-json-schema", {"choices": [{"message": {"content": ""}}]}),
+    ("chat-completions-json-schema", {"choices": [{"message": {"refusal": "no"}}]}),
+])
+def test_wrong_multiple_empty_and_refused_envelopes_are_rejected(protocol, envelope):
+    response = TransportResponse(200, json.dumps(envelope).encode())
+    director, transport = director_with([response], protocol=protocol)
+    with pytest.raises(ValueError):
+        director.create_spec("idea")
+    assert len(transport.requests) == 1
+
+
+def test_wire_schema_avoids_provider_incompatible_keywords_and_round_trips():
+    internal = adventure_spec_json_schema()
+    assert "propertyNames" in json.dumps(internal)
+    for protocol in ("responses-v1", "chat-completions-json-schema"):
+        schema = provider_generation_json_schema(protocol)
+        keywords = validate_provider_schema(schema, protocol)
+        rendered = json.dumps(schema)
+        assert "propertyNames" not in rendered and "prefixItems" not in rendered and "anyOf" not in rendered
+        assert set(keywords) >= {"properties", "required", "additionalProperties", "items"}
+    for spec in (synthetic_lab_spec(), synthetic_pirate_spec()):
+        wire = adventure_spec_to_wire(spec)
+        assert wire_to_adventure_spec(wire) == spec
+        assert isinstance(wire["objects"][0]["initial_state"], list)
+
+
+def _preflight_transport(protocol, *, model="example-model-1", probe=None):
+    models = TransportResponse(200, json.dumps({"data": [{"id": model}]}).encode())
+    transport = FakeTransport([models, probe if probe is not None else json.dumps(minimal_provider_probe_wire())])
+    config = OpenAICompatibleConfig("https://llm.example.test/v1", SECRET, "example-model-1", protocol)
+    return check_story_director(config, transport), transport
+
+
+@pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
+def test_schema_preflight_succeeds_without_game_output(protocol, tmp_path):
+    report, transport = _preflight_transport(protocol)
+    assert report["ok"] is True
+    assert report["model_present"]["ok"] is True
+    assert report["structured_output_schema_accepted"]["ok"] is True
+    assert [item.method for item in transport.requests] == ["GET", "POST"]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("status,key", [(404, "protocol_endpoint_present"), (400, "structured_output_schema_accepted")])
+def test_schema_preflight_reports_endpoint_and_schema_http_failures(status, key):
+    models = TransportResponse(200, json.dumps({"data": [{"id": "example-model-1"}]}).encode())
+    transport = FakeTransport([models, TransportHTTPError(status)])
+    config = OpenAICompatibleConfig("https://llm.example.test/v1", SECRET, "example-model-1", "chat-completions-json-schema")
+    report = check_story_director(config, transport)
+    assert report["ok"] is False and report[key]["ok"] is False
+    assert f"HTTP {status}" in report[key]["detail"]
+
+
+def test_schema_preflight_reports_missing_model_and_redacts_secret():
+    report, _ = _preflight_transport("responses-v1", model="other-model")
+    assert report["model_present"] == {"ok": False, "detail": "configured model not found"}
+    assert report["ok"] is False
+    transport = FakeTransport([TransportError(f"connection failed {SECRET}"), TransportError(f"connection failed {SECRET}")])
+    config = OpenAICompatibleConfig("https://llm.example.test/v1", SECRET, "example-model-1", "responses-v1")
+    redacted = check_story_director(config, transport)
+    assert SECRET not in json.dumps(redacted)
+
+
+def test_protocol_is_mandatory_and_never_inferred():
+    with pytest.raises(ValueError, match="protocol is required"):
+        OpenAICompatibleConfig("https://host/v1", SECRET, "model", "").validate()
+
+
+class _SlowHandler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            if self.path == "/redirect":
+                self.send_response(302); self.send_header("Location", "/elsewhere"); self.end_headers(); return
+            if self.path == "/large":
+                self.send_response(200); self.send_header("Content-Length", "4096"); self.end_headers(); return
+            self.send_response(200); self.end_headers()
+            if self.path == "/read-timeout":
+                time.sleep(0.2); self.wfile.write(b"x"); return
+            if self.path == "/trickle":
+                for _ in range(20):
+                    self.wfile.write(b"x"); self.wfile.flush(); time.sleep(0.04)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture
+def slow_http_server():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def _http_request(url, *, read=0.1, total=1.0, maximum=1024):
+    return TransportRequest(url=url, headers={"Content-Type": "application/json"}, body=b"{}", connect_timeout=0.5, read_timeout=read, total_timeout=total, max_response_bytes=maximum)
+
+
+def test_http_transport_read_timeout_uses_no_private_urllib_attributes(slow_http_server):
+    with pytest.raises(TransportTimeout):
+        HTTPTransport().send(_http_request(slow_http_server + "/read-timeout", read=0.05))
+
+
+def test_http_transport_hard_total_timeout_stops_slow_trickle(slow_http_server):
+    started = time.monotonic()
+    with pytest.raises(TransportTimeout, match="total timeout"):
+        HTTPTransport().send(_http_request(slow_http_server + "/trickle", read=0.2, total=0.14))
+    assert time.monotonic() - started < 0.5
+
+
+def test_http_transport_rejects_redirect_and_oversized_response(slow_http_server):
+    with pytest.raises(TransportRedirect):
+        HTTPTransport().send(_http_request(slow_http_server + "/redirect"))
+    with pytest.raises(ResponseTooLarge):
+        HTTPTransport().send(_http_request(slow_http_server + "/large", maximum=1024))
+
+
+@pytest.mark.parametrize("protocol", ["responses-v1", "chat-completions-json-schema"])
+def test_provenance_records_exact_selected_protocol(protocol, tmp_path):
+    director, _ = director_with([raw_spec(synthetic_lab_spec())], protocol=protocol)
+    output = tmp_path / protocol
+    generate_adventure(director, "idea", output)
+    provenance = json.loads((output / "director_provenance.json").read_text(encoding="utf-8"))
+    assert provenance["provider_protocol"] == protocol
