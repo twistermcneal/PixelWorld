@@ -60,4 +60,3 @@ Der Ausgabeordner enthält AdventureSpec, RoomSpec, Scene Graph, vollständiges 
 - Professor Knallbert besitzt eine feste Hinweiszeile statt Dialogbaum.
 - Das Portal beendet Phase 1 als Zustandsziel; ein Folgeraum existiert noch nicht.
 - Semantische Audio-, Animations- und Assetreferenzen benötigen später eigene versionierte Verträge.
-

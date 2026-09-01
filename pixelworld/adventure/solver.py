@@ -59,4 +59,3 @@ def _report(solvable, path, examined, visited, maximum):
         "max_states": maximum,
         "solution_digest": digest,
     }
-

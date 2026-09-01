@@ -216,4 +216,3 @@ def test_existing_version_contracts_remain_available():
 
     assert VERSION == "0.6.1"
     assert VERSION_062 == "0.6.2"
-

@@ -62,4 +62,3 @@ class ThemeOntology:
 
     def as_document(self) -> dict:
         return {"schema_version": self.version, "themes": deepcopy(THEMES)}
-

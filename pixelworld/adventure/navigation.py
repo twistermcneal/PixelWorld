@@ -180,4 +180,3 @@ def polygons_overlap(left, right) -> bool:
         segments_intersect(left_points[i], left_points[(i + 1) % len(left_points)], right_points[j], right_points[(j + 1) % len(right_points)], include_touches=False)
         for i in range(len(left_points)) for j in range(len(right_points))
     )
-

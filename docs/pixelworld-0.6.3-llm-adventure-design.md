@@ -68,4 +68,3 @@ Die JavaScript-Runtime interpretiert `runtime_rules` und den Scene Graph generis
 Ein echtes LLM soll zunächst nur AdventureSpec-Kandidaten erzeugen. Validierungsfeedback kann für Reparaturversuche an den Provider zurückgegeben werden, niemals jedoch als ausführbarer Code. Danach können mehrere Räume, umfangreichere typisierte Prädikate, Dialogdaten, Autorenwerkzeuge und hochwertige eigene Assets folgen.
 
 Aus validierten Specs, Compilerentscheidungen, Solverpfaden und Rasterisierungen lassen sich später synthetische Trainingspaare bilden. Ein trainiertes PixelWorld-Modell kann dann Layoutvorschläge, Walkboxen, Asset-Varianten oder visuelle Komposition vorhersagen. Referenzprüfung, Zustandsmaschine, Kollision, Solver, Sicherheitsgrenzen und Export bleiben deterministisch und außerhalb des Modells.
-

@@ -105,4 +105,3 @@ def _validate_scene(room, scene):
 
 def _polygon_in_world(polygon, width, height, label):
     _require(all(0 <= point[0] <= width and 0 <= point[1] <= height for point in polygon), f"{label} lies outside the world")
-

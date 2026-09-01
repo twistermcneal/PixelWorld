@@ -144,4 +144,3 @@ def compile_digest(game: dict) -> str:
     payload.pop("compile_digest", None)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-

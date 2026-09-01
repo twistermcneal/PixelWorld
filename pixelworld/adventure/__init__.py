@@ -13,4 +13,3 @@ __all__ = [
     "generate_adventure",
     "validate_adventure_spec",
 ]
-

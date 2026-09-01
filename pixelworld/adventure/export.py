@@ -94,4 +94,3 @@ def export_browser(game: dict, output: str | Path) -> list[str]:
     for path, content in files.items():
         path.write_text(content, encoding="utf-8")
     return [str(path.relative_to(output)).replace("\\", "/") for path in files]
-

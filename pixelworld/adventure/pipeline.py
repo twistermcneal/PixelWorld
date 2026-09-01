@@ -40,4 +40,3 @@ def generate_adventure(director: StoryDirector, prompt: str, output: str | Path)
         "files": ["adventure_spec.json", "room_spec.json", "scene_graph.json", "game.json", "validation_report.json", "solution.json"] + browser_files,
         "source": "fixture" if director.__class__.__name__ == "FixtureStoryDirector" else "json",
     }
-
