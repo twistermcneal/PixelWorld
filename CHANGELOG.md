@@ -3,6 +3,9 @@
 ## 0.6.3
 
 - erster vertikaler Prototyp für strukturierte LLM-zu-Adventure-Erzeugung
+- provider-neutraler OpenAI-kompatibler Responses-v1-Director mit Strict JSON Schema
+- begrenzter einmaliger Repair-Loop und atomare Director-Provenienz
+- injizierbarer, timeout- und größenbegrenzter HTTP-Transport ohne Redirect-Folgen
 - strikt validierte AdventureSpec, RoomSpec und Scene Graphs
 - versionierte Theme-Ontologie mit fünf Themes
 - deterministische 128×72-Golden-Room-Kompilierung

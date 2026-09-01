@@ -69,6 +69,6 @@ Generierte Dateien werden zunächst vollständig in ein temporäres Nachbarverze
 
 ## Spätere Entwicklung
 
-Ein echtes LLM soll zunächst nur AdventureSpec-Kandidaten erzeugen. Validierungsfeedback kann für Reparaturversuche an den Provider zurückgegeben werden, niemals jedoch als ausführbarer Code. Danach können mehrere Räume, umfangreichere typisierte Prädikate, Dialogdaten, Autorenwerkzeuge und hochwertige eigene Assets folgen.
+Phase 2 implementiert dafür einen provider-neutralen OpenAI-kompatiblen Director mit strengem Structured-Output-Schema, injizierbarem HTTP-Transport und genau einem begrenzten Reparaturversuch. Die vollständige Vertrauensgrenze, Konfiguration und Provenienz beschreibt [`pixelworld-0.6.3-openai-compatible-director.md`](pixelworld-0.6.3-openai-compatible-director.md). Die erste externe Modellanfrage bleibt eine bewusst separate Freigabe; Phase 2 wurde ausschließlich mit synthetischen Fake-Antworten getestet. Danach können mehrere Räume, umfangreichere typisierte Prädikate, Dialogdaten, Autorenwerkzeuge und hochwertige eigene Assets folgen.
 
 Aus validierten Specs, Compilerentscheidungen, Solverpfaden und Rasterisierungen lassen sich später synthetische Trainingspaare bilden. Ein trainiertes PixelWorld-Modell kann dann Layoutvorschläge, Walkboxen, Asset-Varianten oder visuelle Komposition vorhersagen. Referenzprüfung, Zustandsmaschine, Kollision, Solver, Sicherheitsgrenzen und Export bleiben deterministisch und außerhalb des Modells.

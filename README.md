@@ -15,6 +15,8 @@ python -m pixelworld.cli adventure-validate --spec outputs/adventures/0.6.3-gold
 python -m pixelworld.cli adventure-solve --game outputs/adventures/0.6.3-golden-lab/game.json
 ```
 
+Phase 2 ergänzt einen echten, aber standardmäßig nicht konfigurierten OpenAI-kompatiblen Story Director. Er verwendet ausschließlich strukturierte AdventureSpec-Ausgaben; Compiler, Validator und Solver bleiben die Autorität. Konfiguration, Requestvertrag, Repair-Loop und Secret-Schutz stehen in [`docs/pixelworld-0.6.3-openai-compatible-director.md`](docs/pixelworld-0.6.3-openai-compatible-director.md). Die Teststrategie führt keine externen Modellaufrufe aus.
+
 **Reproduzierbare Forschungsbasis: Version 0.6.1 – Terrainregionen und Vegetation**
 
 Das Modell erzeugt strukturierte Außenwelten mit Terrain- und Region Graph sowie bis zu acht wichtigen Landmark Slots. Jeder vorhandene Slot enthält:
