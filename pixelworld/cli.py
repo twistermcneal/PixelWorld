@@ -71,6 +71,7 @@ def build_parser():
     adventure_generate = subparsers.add_parser("adventure-generate", help="compile and export a PixelWorld adventure")
     adventure_generate.add_argument("--version", default="0.6.3", choices=("0.6.3",))
     adventure_generate.add_argument("--director", default="fixture", choices=("fixture", "json"))
+    adventure_generate.add_argument("--fixture", default="golden_lab", choices=("golden_lab", "pirate_harbor"), help="explicit fixture selection; prompt text is never inspected")
     adventure_generate.add_argument("--prompt", default="Ein verrückter Wissenschaftler repariert seine Zeitmaschine")
     adventure_generate.add_argument("--spec", help="AdventureSpec JSON used with --director json")
     adventure_generate.add_argument("--output", required=True)
@@ -218,7 +219,7 @@ def command_adventure_generate(args):
             raise ValueError("--director json requires --spec")
         director = JsonStoryDirector(args.spec)
     else:
-        director = FixtureStoryDirector()
+        director = FixtureStoryDirector(args.fixture)
     result = generate_adventure(director, args.prompt, args.output)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

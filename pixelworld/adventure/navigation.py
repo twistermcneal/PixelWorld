@@ -49,11 +49,18 @@ def project_to_polygon(point, polygon):
     return min(candidates, key=lambda candidate: (_distance(point, candidate), candidate[0], candidate[1]))
 
 
-def project_to_walkboxes(point, walkboxes):
+def project_to_walkboxes(point, walkboxes, collisions=()):
+    point = validate_point(point)
+    collision_data = [item.get("polygon", item) if isinstance(item, dict) else item for item in collisions]
+    if point_walkable(point, walkboxes, collision_data):
+        return point
     candidates = []
     for walkbox in sorted(walkboxes, key=lambda item: item["id"]):
-        projected = project_to_polygon(point, walkbox["polygon"])
-        candidates.append((_distance(point, projected), projected[0], projected[1], walkbox["id"], projected))
+        polygon = [tuple(item) for item in validate_polygon(walkbox["polygon"])]
+        for index in range(len(polygon)):
+            projected = closest_point_on_segment(point, polygon[index], polygon[(index + 1) % len(polygon)])
+            if point_walkable(projected, walkboxes, collision_data):
+                candidates.append((_distance(point, projected), projected[0], projected[1], walkbox["id"], projected))
     if not candidates:
         raise ValueError("at least one walkbox is required")
     return min(candidates)[-1]
@@ -125,9 +132,9 @@ def _edge_map(edges):
 def shortest_route(start, goal, walkboxes, navigation_edges, collision_polygons=()):
     """Find the deterministic shortest route and smooth its polyline."""
 
-    start = project_to_walkboxes(start, walkboxes)
-    goal = project_to_walkboxes(goal, walkboxes)
-    collisions = [item.get("polygon", item) for item in collision_polygons]
+    collisions = [item.get("polygon", item) if isinstance(item, dict) else item for item in collision_polygons]
+    start = project_to_walkboxes(start, walkboxes, collisions)
+    goal = project_to_walkboxes(goal, walkboxes, collisions)
     if segment_walkable(start, goal, walkboxes, collisions):
         return [list(start), list(goal)]
     starts = _containing_boxes(start, walkboxes)

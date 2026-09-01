@@ -30,7 +30,7 @@ THEMES = {
         ["neon_sparks"], ["time_portal"], ["large_bottle", "pipework"],
         ["machine", "console", "ingredient", "container", "npc", "exit", "scenery"],
     ),
-    "pirate_harbor": _theme(["dock", "water"], ["wooden_pier", "tavern"], ["barrel", "ship", "rope"], ["pirate"], ["#14213d", "#8d5524", "#fca311"], ["sunset"], ["gangplank"], ["cargo"], ["exit", "npc", "scenery"]),
+    "pirate_harbor": _theme(["dock", "water"], ["wooden_pier", "tavern"], ["brass_key", "locked_chest", "harbor_exit", "barrel", "ship", "rope"], ["pirate"], ["#14213d", "#8d5524", "#fca311"], ["sunset"], ["gangplank"], ["cargo"], ["item", "container", "exit", "npc", "scenery"]),
     "forest_ruin": _theme(["forest_floor", "stone"], ["ruin_wall", "arch"], ["tree", "altar", "vine"], ["guardian"], ["#132a13", "#31572c", "#90a955"], ["dappled"], ["stone_arch"], ["foliage"], ["exit", "npc", "scenery"]),
     "spaceship": _theme(["deck", "service_grate"], ["bulkhead", "airlock"], ["console", "reactor", "crate"], ["crew", "android"], ["#090b1a", "#3a86ff", "#ff006e"], ["emergency"], ["airlock"], ["cabling"], ["exit", "npc", "machine"]),
     "medieval_village": _theme(["road", "grass"], ["cottage", "market_stall"], ["well", "cart", "sign"], ["villager"], ["#432818", "#99582a", "#ffe6a7"], ["daylight"], ["village_gate"], ["fence"], ["exit", "npc", "scenery"]),
@@ -59,6 +59,10 @@ class ThemeOntology:
         for character in spec["characters"]:
             if character["archetype"] not in allowed_npcs:
                 raise ValueError(f"character {character['id']!r} has archetype {character['archetype']!r}, incompatible with theme {theme_name!r}")
+        allowed_roles = set(theme["hotspot_roles"])
+        for entity in spec["objects"] + spec["characters"]:
+            if entity["role"] not in allowed_roles:
+                raise ValueError(f"entity {entity['id']!r} has role {entity['role']!r}, incompatible with theme {theme_name!r}")
 
     def as_document(self) -> dict:
         return {"schema_version": self.version, "themes": deepcopy(THEMES)}

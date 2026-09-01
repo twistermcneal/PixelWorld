@@ -1,96 +1,93 @@
-"""Dependency-free browser export for a compiled adventure."""
-
+"""Dependency-free browser export with a Node-testable runtime core."""
 from __future__ import annotations
 
-import json
+import os
 from pathlib import Path
 
 
 INDEX_HTML = """<!doctype html>
-<html lang="de">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>PixelWorld Adventure 0.6.3</title>
-  <link rel="stylesheet" href="styles.css">
-</head>
-<body>
-  <main>
-    <header><h1>PixelWorld Adventure</h1><button id="debug-toggle">Walkboxen anzeigen</button></header>
-    <section id="game-shell">
-      <canvas id="scene" width="1024" height="576" aria-label="Spielbarer Adventure-Raum"></canvas>
-      <div id="status" role="status">Klicke auf einen Gegenstand oder auf den Boden.</div>
-      <div id="actions" aria-label="Aktionen"></div>
-      <div id="inventory" aria-label="Inventar"></div>
-    </section>
-    <p class="notice">Eigene deterministische Pixel-Platzhalter – keine externen Assets.</p>
-  </main>
-  <script src="runtime.js"></script>
-</body>
-</html>
-"""
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PixelWorld Adventure 0.6.3</title><link rel="stylesheet" href="styles.css"></head>
+<body><main><header><h1>PixelWorld Adventure</h1><button id="debug-toggle">Walkboxen anzeigen</button></header>
+<section id="game-shell"><canvas id="scene" width="1024" height="576" aria-label="Spielbarer Adventure-Raum"></canvas>
+<div id="status" role="status">Spiel wird geladen …</div><div id="actions" aria-label="Aktionen"></div><div id="inventory" aria-label="Inventar"></div></section>
+<p class="notice">Eigene deterministische Pixel-Platzhalter – keine externen Assets.</p></main>
+<script src="runtime-core.js"></script><script src="runtime.js"></script></body></html>"""
 
+STYLES_CSS = """:root{color-scheme:dark;font-family:ui-monospace,Consolas,monospace;background:#050914;color:#dffcff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% 20%,#18304a,#050914 70%);min-height:100vh}main{width:min(1100px,100%);margin:auto;padding:16px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:clamp(18px,3vw,30px);color:#28e7ff;text-shadow:3px 3px #57205f}button{font:inherit;color:#07111f;background:#ffd33d;border:0;border-bottom:4px solid #a86d0b;padding:8px 12px;cursor:pointer}.selected{outline:3px solid #fff}#game-shell{border:4px solid #335a72;background:#07111f;box-shadow:0 0 30px #28e7ff55}canvas{display:block;width:100%;height:auto;image-rendering:pixelated;cursor:crosshair}#status{min-height:48px;padding:12px;color:#fff;background:#101d31;border-top:3px solid #335a72}#actions,#inventory{display:flex;flex-wrap:wrap;gap:8px;padding:10px;border-top:2px solid #223d55;min-height:54px}#inventory{background:#0a1424}#inventory::before{content:'INVENTAR';color:#ff3b81;padding:9px}.item{background:#9cff57}.notice{color:#8ca8b8;font-size:12px}"""
 
-STYLES_CSS = """:root{color-scheme:dark;font-family:ui-monospace,Consolas,monospace;background:#050914;color:#dffcff}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% 20%,#18304a,#050914 70%);min-height:100vh}
-main{width:min(1100px,100%);margin:auto;padding:16px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}
-h1{font-size:clamp(18px,3vw,30px);color:#28e7ff;text-shadow:3px 3px #57205f}button{font:inherit;color:#07111f;background:#ffd33d;border:0;border-bottom:4px solid #a86d0b;padding:8px 12px;cursor:pointer}
-#game-shell{border:4px solid #335a72;background:#07111f;box-shadow:0 0 30px #28e7ff55}canvas{display:block;width:100%;height:auto;image-rendering:pixelated;cursor:crosshair}
-#status{min-height:48px;padding:12px;color:#fff;background:#101d31;border-top:3px solid #335a72}
-#actions,#inventory{display:flex;flex-wrap:wrap;gap:8px;padding:10px;border-top:2px solid #223d55;min-height:54px}
-#inventory{background:#0a1424}#inventory::before{content:'INVENTAR';color:#ff3b81;padding:9px}.item{background:#9cff57}.notice{color:#8ca8b8;font-size:12px}
-"""
-
-
-RUNTIME_TEMPLATE = r'''"use strict";
-// Generic 0.6.3 interpreter. All room-specific entities and rules are compiled data below.
-const GAME = __GAME_DATA__;
-const canvas=document.querySelector("#scene"),ctx=canvas.getContext("2d"),statusEl=document.querySelector("#status"),actionsEl=document.querySelector("#actions"),inventoryEl=document.querySelector("#inventory");
-const scene=GAME.scene_graph,rules=GAME.runtime_rules,S=canvas.width/scene.size[0];
-let state=structuredClone(scene.initial_state),selected=null,debug=false;
-const entities=new Map(scene.entities.map(e=>[e.id,e]));
-function pointIn(p,poly){let inside=false;for(let i=0,j=poly.length-1;i<poly.length;j=i++){const a=poly[i],b=poly[j];if(((a[1]>p[1])!==(b[1]>p[1]))&&(p[0]<(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0]))inside=!inside;}return inside;}
-function closest(p,a,b){const dx=b[0]-a[0],dy=b[1]-a[1],n=dx*dx+dy*dy,t=n?Math.max(0,Math.min(1,((p[0]-a[0])*dx+(p[1]-a[1])*dy)/n)):0;return[a[0]+t*dx,a[1]+t*dy];}
-function project(p){const inside=scene.walkboxes.find(w=>pointIn(p,w.polygon));if(inside)return p;let best=null;for(const w of scene.walkboxes)for(let i=0;i<w.polygon.length;i++){const q=closest(p,w.polygon[i],w.polygon[(i+1)%w.polygon.length]),d=(q[0]-p[0])**2+(q[1]-p[1])**2,c=[d,q[0],q[1],q];if(!best||JSON.stringify(c.slice(0,3))<JSON.stringify(best.slice(0,3)))best=c;}return best[3];}
-function walkable(p){return scene.walkboxes.some(w=>pointIn(p,w.polygon))&&!scene.collision_polygons.some(c=>pointIn(p,c.polygon));}
-function clear(a,b){const n=Math.max(2,Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])*2));for(let i=0;i<=n;i++)if(!walkable([a[0]+(b[0]-a[0])*i/n,a[1]+(b[1]-a[1])*i/n]))return false;return true;}
-function boxes(p){return scene.walkboxes.filter(w=>pointIn(p,w.polygon)).map(w=>w.id).sort();}
-function route(goal){goal=project(goal);const start=state.player_position;if(clear(start,goal))return[start,goal];const goals=new Set(boxes(goal)),queue=boxes(start).map(id=>({id,pts:[start]})),seen=new Set(queue.map(x=>x.id));while(queue.length){const cur=queue.shift(),last=cur.pts[cur.pts.length-1];if(goals.has(cur.id)&&clear(last,goal))return smooth([...cur.pts,goal]);const edges=scene.navigation_edges.filter(e=>e.from===cur.id||e.to===cur.id).map(e=>({id:e.from===cur.id?e.to:e.from,p:e.point})).sort((a,b)=>a.id.localeCompare(b.id));for(const e of edges)if(!seen.has(e.id)&&clear(last,e.p)){seen.add(e.id);queue.push({id:e.id,pts:[...cur.pts,e.p]});}}return null;}
-function smooth(points){const out=[points[0]];let i=0;while(i<points.length-1){let j=points.length-1;while(j>i+1&&!clear(points[i],points[j]))j--;out.push(points[j]);i=j;}return out;}
-function animate(path,done){if(!path){say("Dieses Ziel ist nicht erreichbar.");return;}let segment=1;function frame(){if(segment>=path.length){done&&done();return;}const p=state.player_position,q=path[segment],d=Math.hypot(q[0]-p[0],q[1]-p[1]);if(d<.45){state.player_position=[...q];segment++;}else state.player_position=[p[0]+(q[0]-p[0])*.35/d,p[1]+(q[1]-p[1])*.35/d];render();requestAnimationFrame(frame);}frame();}
-function read(path){return path.split(".").reduce((v,k)=>v[k],state);}function write(path,value){const parts=path.split("."),key=parts.pop(),target=parts.reduce((v,k)=>v[k],state);target[key]=value;}
-function condition(c){if(c.op==="equals")return read(c.path)===c.value;if(c.op==="inventory_contains")return state.inventory.includes(c.value);if(c.op==="inventory_missing")return!state.inventory.includes(c.value);return false;}
-function effect(e){if(e.op==="set")write(e.path,e.value);else if(e.op==="inventory_add"&&!state.inventory.includes(e.value))state.inventory.push(e.value);else if(e.op==="inventory_remove")state.inventory=state.inventory.filter(x=>x!==e.value);state.inventory.sort();}
-function available(i){const e=entities.get(i.target_id),s=state.objects[i.target_id]||{};return e&&e.visible&&e.enabled&&!s.taken&&i.conditions.every(condition);}
-function invoke(interaction){const e=entities.get(interaction.target_id),path=route(e.walk_to_point);animate(path,()=>{interaction.effects.forEach(effect);state.completed=rules.ending_conditions.some(end=>end.conditions.every(condition));say(interaction.text+(state.completed?" Raumziel erreicht!":""));selected=null;render();});}
-function say(text){statusEl.textContent=text;}
-function polygon(poly,fill,stroke){ctx.beginPath();ctx.moveTo(poly[0][0]*S,poly[0][1]*S);for(const p of poly.slice(1))ctx.lineTo(p[0]*S,p[1]*S);ctx.closePath();if(fill){ctx.fillStyle=fill;ctx.fill();}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.stroke();}}
-const colors={time_machine:"#28e7ff",control_console:"#ffd33d",chemical_bottle:"#ff3b81",mixing_flask:"#dffcff",time_portal:"#9cff57",robot_arm:"#738fa7",gear:"#b48c5e",mad_scientist:"#f5f0dc"};
-function drawEntity(e){const st=state.objects[e.id]||{};if(!e.visible||st.taken)return;const[x,y,w,h]=e.bbox;ctx.fillStyle=colors[e.class]||"#af7ac5";ctx.fillRect(x*S,y*S,w*S,h*S);ctx.fillStyle="#07111f";ctx.fillRect((x+2)*S,(y+2)*S,Math.max(1,w-4)*S,Math.max(1,h-4)*S);ctx.fillStyle=colors[e.class]||"#af7ac5";ctx.fillRect((x+3)*S,(y+3)*S,Math.max(1,w-6)*S,Math.max(1,h-6)*S);if(st.cooled||st.active){ctx.shadowColor="#9cff57";ctx.shadowBlur=24;ctx.strokeStyle="#fff";ctx.lineWidth=3;ctx.strokeRect(x*S,y*S,w*S,h*S);ctx.shadowBlur=0;}if(selected===e.id)polygon(e.hotspot_polygon,null,"#fff");}
-function render(){const g=ctx.createLinearGradient(0,0,0,canvas.height);g.addColorStop(0,"#07111f");g.addColorStop(.7,"#18304a");g.addColorStop(1,"#090b12");ctx.fillStyle=g;ctx.fillRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#20364a";ctx.fillRect(0,40*S,canvas.width,32*S);ctx.strokeStyle="#28e7ff33";for(let x=0;x<128;x+=8){ctx.beginPath();ctx.moveTo(x*S,40*S);ctx.lineTo(x*S,72*S);ctx.stroke();}for(let y=40;y<72;y+=8){ctx.beginPath();ctx.moveTo(0,y*S);ctx.lineTo(canvas.width,y*S);ctx.stroke();}scene.entities.slice().sort((a,b)=>a.z_layer-b.z_layer).forEach(drawEntity);const p=state.player_position;ctx.fillStyle="#ffcf8b";ctx.fillRect((p[0]-2)*S,(p[1]-9)*S,4*S,9*S);ctx.fillStyle="#4e9cff";ctx.fillRect((p[0]-3)*S,(p[1]-5)*S,6*S,5*S);scene.occlusion_polygons.forEach(o=>polygon(o.polygon,"#0a1424",null));if(debug){scene.walkboxes.forEach(w=>polygon(w.polygon,"#28e7ff22","#28e7ff"));scene.collision_polygons.forEach(c=>polygon(c.polygon,"#ff3b8144","#ff3b81"));scene.walk_to_points.forEach(w=>{ctx.fillStyle="#ffd33d";ctx.fillRect(w.point[0]*S-3,w.point[1]*S-3,6,6);});}renderUi();}
-function renderUi(){actionsEl.replaceChildren();inventoryEl.querySelectorAll("button").forEach(e=>e.remove());for(const id of state.inventory){const b=document.createElement("button");b.className="item";b.textContent=(GAME.adventure.inventory_items.find(x=>x.id===id)||{name:id}).name;inventoryEl.append(b);}if(!selected)return;const e=entities.get(selected);addAction("Ansehen",()=>say(e.description));if(e.hotspot_role==="npc")addAction("Reden",()=>say("Knallbert: Zwei Reagenzien, eine Flasche – dann ab damit in die Maschine!"));for(const i of rules.interactions.filter(x=>x.target_id===selected&&available(x)))addAction(label(i),()=>invoke(i));}
-function label(i){if(i.verb==="take")return"Nehmen";if(i.verb==="combine")return"Kombinieren";if(i.verb==="use")return"Benutzen: "+i.item_ids.join(" + ");return i.verb;}
-function addAction(label,fn){const b=document.createElement("button");b.textContent=label;b.addEventListener("click",fn);actionsEl.append(b);}
-canvas.addEventListener("click",event=>{const box=canvas.getBoundingClientRect(),p=[(event.clientX-box.left)/box.width*scene.size[0],(event.clientY-box.top)/box.height*scene.size[1]],hit=scene.entities.filter(e=>e.visible&&!(state.objects[e.id]||{}).taken&&pointIn(p,e.hotspot_polygon)).sort((a,b)=>b.z_layer-a.z_layer)[0];if(hit){selected=hit.id;say(hit.name+" ausgewählt.");render();}else{selected=null;animate(route(p),()=>say("Ziel erreicht."));}});
-document.querySelector("#debug-toggle").addEventListener("click",()=>{debug=!debug;render();});render();
+RUNTIME_CORE = r'''"use strict";
+const PixelWorldCore=(()=>{
+const EPS=1e-9,clone=value=>JSON.parse(JSON.stringify(value));
+function point(p,a,b){const cross=(p[0]-a[0])*(b[1]-a[1])-(p[1]-a[1])*(b[0]-a[0]);return Math.abs(cross)<=EPS&&p[0]>=Math.min(a[0],b[0])-EPS&&p[0]<=Math.max(a[0],b[0])+EPS&&p[1]>=Math.min(a[1],b[1])-EPS&&p[1]<=Math.max(a[1],b[1])+EPS;}
+function pointIn(p,poly,boundary=true){let inside=false;for(let i=0;i<poly.length;i++){const a=poly[i],b=poly[(i+1)%poly.length];if(point(p,a,b))return boundary;if((a[1]>p[1])!==(b[1]>p[1])){const x=(b[0]-a[0])*(p[1]-a[1])/(b[1]-a[1])+a[0];if(p[0]<x)inside=!inside;}}return inside;}
+function closest(p,a,b){const dx=b[0]-a[0],dy=b[1]-a[1],n=dx*dx+dy*dy,t=n<=EPS?0:Math.max(0,Math.min(1,((p[0]-a[0])*dx+(p[1]-a[1])*dy)/n));return[a[0]+t*dx,a[1]+t*dy];}
+const distance=(a,b)=>Math.hypot(b[0]-a[0],b[1]-a[1]);
+function orientation(a,b,c){const v=(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);return Math.abs(v)<=EPS?0:(v>0?1:-1);}
+function intersects(a,b,c,d,touches=true){const v=[orientation(a,b,c),orientation(a,b,d),orientation(c,d,a),orientation(c,d,b)];if(v[0]!==v[1]&&v[2]!==v[3])return true;if(touches&&v.includes(0))return point(c,a,b)||point(d,a,b)||point(a,c,d)||point(b,c,d);return false;}
+function crosses(a,b,poly){if(pointIn(a,poly,false)||pointIn(b,poly,false))return true;for(let i=0;i<poly.length;i++)if(intersects(a,b,poly[i],poly[(i+1)%poly.length],false))return true;return pointIn([(a[0]+b[0])/2,(a[1]+b[1])/2],poly,false);}
+function walkable(p,boxes,collisions=[]){return boxes.some(w=>pointIn(p,w.polygon))&&!collisions.some(c=>pointIn(p,c.polygon||c,false));}
+function clear(a,b,boxes,collisions=[]){if(collisions.some(c=>crosses(a,b,c.polygon||c)))return false;const n=Math.max(2,Math.ceil(distance(a,b)*2));for(let i=0;i<=n;i++)if(!walkable([a[0]+(b[0]-a[0])*i/n,a[1]+(b[1]-a[1])*i/n],boxes,collisions))return false;return true;}
+function numericCandidate(a,b){if(Math.abs(a[0]-b[0])>EPS)return a[0]-b[0];if(Math.abs(a[1]-b[1])>EPS)return a[1]-b[1];if(Math.abs(a[2]-b[2])>EPS)return a[2]-b[2];return a[3].localeCompare(b[3]);}
+function project(p,boxes,collisions=[]){if(walkable(p,boxes,collisions))return[p[0],p[1]];const candidates=[];for(const box of [...boxes].sort((a,b)=>a.id.localeCompare(b.id)))for(let i=0;i<box.polygon.length;i++){const q=closest(p,box.polygon[i],box.polygon[(i+1)%box.polygon.length]);if(walkable(q,boxes,collisions))candidates.push([distance(p,q),q[0],q[1],box.id,q]);}if(!candidates.length)throw Error("no collision-free projection exists");candidates.sort(numericCandidate);return candidates[0][4];}
+const boxesFor=(p,boxes)=>boxes.filter(w=>pointIn(p,w.polygon)).map(w=>w.id).sort();
+function signatureCompare(a,b){for(let i=0;i<Math.min(a.length,b.length);i++){const c=a[i].localeCompare(b[i]);if(c)return c;}return a.length-b.length;}
+function route(start,goal,boxes,edges,collisions=[]){start=project(start,boxes,collisions);goal=project(goal,boxes,collisions);if(clear(start,goal,boxes,collisions))return[start,goal];const goals=new Set(boxesFor(goal,boxes)),graph={};for(const e of edges){(graph[e.from]??=[]).push([e.to,e.point]);(graph[e.to]??=[]).push([e.from,e.point]);}for(const values of Object.values(graph))values.sort((a,b)=>a[0].localeCompare(b[0])||a[1][0]-b[1][0]||a[1][1]-b[1][1]);const queue=boxesFor(start,boxes).map(id=>({cost:0,sig:[id],id,current:start,points:[start]})),best=new Map();while(queue.length){queue.sort((a,b)=>a.cost-b.cost||signatureCompare(a.sig,b.sig)||a.current[0]-b.current[0]||a.current[1]-b.current[1]);const cur=queue.shift(),key=cur.id+":"+cur.current.join(",");if(cur.cost>(best.get(key)??Infinity)+EPS)continue;if(goals.has(cur.id)&&clear(cur.current,goal,boxes,collisions))return smooth([...cur.points,goal],boxes,collisions);for(const [id,p] of graph[cur.id]||[]){if(!clear(cur.current,p,boxes,collisions))continue;const cost=cur.cost+distance(cur.current,p),nextKey=id+":"+p.join(",");if(cost<(best.get(nextKey)??Infinity)-EPS){best.set(nextKey,cost);queue.push({cost,sig:[...cur.sig,id],id,current:p,points:[...cur.points,p]});}}}throw Error("no collision-free route");}
+function smooth(points,boxes,collisions){const result=[points[0]];let i=0;while(i<points.length-1){let j=points.length-1;while(j>i+1&&!clear(points[i],points[j],boxes,collisions))j--;result.push(points[j].map(v=>Math.round(v*10000)/10000));i=j;}return result;}
+function matches(value,type){if(type==="boolean")return typeof value==="boolean";if(type==="string")return typeof value==="string"&&value.length<=160;if(type==="integer")return Number.isInteger(value)&&Math.abs(value)<=1000000000;if(type==="number")return typeof value==="number"&&Number.isFinite(value)&&!Number.isInteger(value)&&Math.abs(value)<=1000000000;return false;}
+function sameKeys(value,schema){return value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).sort().join("\0")===Object.keys(schema).sort().join("\0");}
+class Runtime{
+ constructor(game,state=null){this.game=clone(game);this.scene=this.game.scene_graph;this.rules=this.game.runtime_rules;this.schema=this.game.state_schema;this.entities=new Map(this.scene.entities.map(e=>[e.id,e]));this.inventoryIds=new Set(this.schema.inventory_ids);this.state=this.validate(state||this.initial());}
+ initial(){const s=clone(this.scene.initial_state);Object.assign(s,{schema_version:"0.6.3",game_digest:this.game.compile_digest,completed:false});s.completed=this.ending(s);return s;}
+ validate(s){if(!sameKeys(s,{schema_version:0,game_digest:0,player_position:0,inventory:0,objects:0,objectives:0,flags:0,completed:0}))throw Error("save fields differ");if(s.schema_version!=="0.6.3"||s.game_digest!==this.game.compile_digest)throw Error("save game/version mismatch");if(!Array.isArray(s.player_position)||s.player_position.length!==2||!s.player_position.every(Number.isFinite)||!walkable(s.player_position,this.scene.walkboxes,this.scene.collision_polygons))throw Error("player position is invalid");if(!Array.isArray(s.inventory)||s.inventory.some(x=>!this.inventoryIds.has(x))||s.inventory.join("\0")!==[...new Set(s.inventory)].sort().join("\0"))throw Error("inventory is invalid");this.namespace(s.objects,this.schema.objects,"objects");this.namespace(s.objectives,this.schema.objectives,"objectives");if(!sameKeys(s.flags,this.schema.flags))throw Error("flag IDs differ");for(const [id,type] of Object.entries(this.schema.flags))if(!matches(s.flags[id],type))throw Error("flag type differs");if(typeof s.completed!=="boolean"||s.completed!==this.ending(s))throw Error("completed differs from ending conditions");return clone(s);}
+ namespace(values,schema,label){if(!sameKeys(values,schema))throw Error(label+" IDs differ");for(const [id,fields] of Object.entries(schema)){if(!sameKeys(values[id],fields))throw Error(label+" fields differ");for(const [field,type] of Object.entries(fields))if(!matches(values[id][field],type))throw Error(label+" type differs");}}
+ read(path,s){let value=s;for(const part of path.split(".")){if(!value||typeof value!=="object"||!(part in value))throw Error("unknown state path "+path);value=value[part];}return value;}
+ write(path,value,s){const parts=path.split("."),key=parts.pop();let target=s;for(const part of parts){if(!target||typeof target!=="object"||!(part in target))throw Error("unknown state path "+path);target=target[part];}if(!(key in target))throw Error("unknown state path "+path);target[key]=value;}
+ condition(c,s){if(c.op==="equals")return this.read(c.path,s)===c.value;if(c.path!=="inventory")throw Error("inventory path required");return c.op==="inventory_contains"?s.inventory.includes(c.value):!s.inventory.includes(c.value);}
+ ending(s){return this.rules.ending_conditions.some(e=>e.conditions.every(c=>this.condition(c,s)));}
+ entityAvailable(e){return e.visible&&e.enabled&&!this.state.objects[e.id].taken;}
+ available(){return [...this.rules.interactions].sort((a,b)=>a.id.localeCompare(b.id)).filter(i=>{const e=this.entities.get(i.target_id),target=e&&(this.entityAvailable(e)||(i.verb==="combine"&&this.state.inventory.includes(i.target_id)));return target&&i.conditions.every(c=>this.condition(c,this.state));}).map(i=>({interaction_id:i.id,verb:i.verb,target_id:i.target_id,item_ids:[...i.item_ids]}));}
+ effect(e,s){if(e.op==="set"){this.write(e.path,clone(e.value),s);return;}if(e.path!=="inventory")throw Error("inventory path required");if(e.op==="inventory_add"){if(!this.inventoryIds.has(e.value)||s.inventory.includes(e.value))throw Error("invalid inventory add");s.inventory.push(e.value);s.inventory.sort();}else if(e.op==="inventory_remove"){const n=s.inventory.indexOf(e.value);if(n<0)throw Error("missing inventory item");s.inventory.splice(n,1);}else throw Error("unknown effect");}
+ perform(action){try{if(!action||typeof action!=="object")throw Error("action must be an object");if(action.verb==="look_at")return this.look(action.target_id);if(action.verb==="talk_to")return this.talk(action.target_id);if(action.verb==="move_to"){const p=route(this.state.player_position,action.point,this.scene.walkboxes,this.scene.navigation_edges,this.scene.collision_polygons),next=clone(this.state);next.player_position=p[p.length-1];this.state=this.validate(next);return this.result(true,"Ziel erreicht.","walk",p);}let target,items;if(action.verb==="take"){target=action.target_id;items=[];}else if(action.verb==="use"){target=action.target_id;items=[action.item_id];}else if(action.verb==="combine"){target=action.container_id;items=[action.first_id,action.second_id].sort();}else throw Error("verb is not allowed");return this.invoke(action.verb,target,items);}catch(error){return this.result(false,"Interaktion abgebrochen: "+error.message,"none",null);}}
+ look(id){const e=this.entities.get(id);return !e||!this.entityAvailable(e)?this.result(false,"Dort gibt es nichts zu betrachten.","none",null):this.result(true,e.description,"look",null);}
+ talk(id){const e=this.entities.get(id);return !e||e.hotspot_role!=="npc"||!this.entityAvailable(e)||!e.default_talk_text?this.result(false,"Damit kann man nicht sprechen.","none",null):this.result(true,e.default_talk_text,"talk",null);}
+ invoke(verb,target,items){const e=this.entities.get(target),ok=e&&(this.entityAvailable(e)||(verb==="combine"&&this.state.inventory.includes(target)));if(!ok)return this.result(false,"Ziel ist nicht verfügbar.","none",null);const candidates=this.rules.interactions.filter(i=>i.verb===verb&&i.target_id===target&&[...i.item_ids].sort().join("\0")===[...items].sort().join("\0")).sort((a,b)=>a.id.localeCompare(b.id));if(!candidates.length)return this.result(false,"Diese Kombination funktioniert nicht.","none",null);const i=candidates[0];if(!i.conditions.every(c=>this.condition(c,this.state)))return this.result(false,"Dafür fehlen noch Voraussetzungen.","none",null);try{const p=verb==="combine"&&this.state.inventory.includes(target)?[clone(this.state.player_position)]:route(this.state.player_position,e.walk_to_point,this.scene.walkboxes,this.scene.navigation_edges,this.scene.collision_polygons),next=clone(this.state);next.player_position=clone(p[p.length-1]);for(const effect of i.effects)this.effect(effect,next);next.completed=this.ending(next);this.state=this.validate(next);return this.result(true,i.text,i.animation_hint,p);}catch(error){return this.result(false,"Interaktion abgebrochen: "+error.message,"none",null);}}
+ result(success,message,animation,path){return{success,message,animation_hint:animation,movement_path:clone(path),next_available_actions:this.available()};}
+}
+return{Runtime,pointIn,project,route,walkable,clear};})();
+if(typeof module==="object"&&module.exports)module.exports=PixelWorldCore;
 '''
 
+RUNTIME_UI = r'''"use strict";
+(async function(){const response=await fetch("game.json");if(!response.ok)throw Error("game.json konnte nicht geladen werden");const game=await response.json(),runtime=new PixelWorldCore.Runtime(game),scene=game.scene_graph,canvas=document.querySelector("#scene"),ctx=canvas.getContext("2d"),statusEl=document.querySelector("#status"),actionsEl=document.querySelector("#actions"),inventoryEl=document.querySelector("#inventory"),S=canvas.width/scene.size[0];let selectedEntity=null,selectedItem=null,debug=false;
+const entities=new Map(scene.entities.map(e=>[e.id,e])),colors={time_machine:"#28e7ff",control_console:"#ffd33d",chemical_bottle:"#ff3b81",mixing_flask:"#dffcff",time_portal:"#9cff57",robot_arm:"#738fa7",gear:"#b48c5e",mad_scientist:"#f5f0dc",brass_key:"#ffd166",locked_chest:"#8d5524",harbor_exit:"#6fffe9",barrel:"#99582a",pirate:"#f5f0dc"};
+function say(text){statusEl.textContent=text;}function poly(points,fill,stroke){ctx.beginPath();ctx.moveTo(points[0][0]*S,points[0][1]*S);for(const p of points.slice(1))ctx.lineTo(p[0]*S,p[1]*S);ctx.closePath();if(fill){ctx.fillStyle=fill;ctx.fill();}if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.stroke();}}
+function entityAvailable(e){return e.visible&&e.enabled&&!(runtime.state.objects[e.id]||{}).taken;}function drawEntity(e){if(!entityAvailable(e))return;const[x,y,w,h]=e.bbox,color=colors[e.class]||"#af7ac5";ctx.fillStyle=color;ctx.fillRect(x*S,y*S,w*S,h*S);ctx.fillStyle="#07111f";ctx.fillRect((x+2)*S,(y+2)*S,Math.max(1,w-4)*S,Math.max(1,h-4)*S);ctx.fillStyle=color;ctx.fillRect((x+3)*S,(y+3)*S,Math.max(1,w-6)*S,Math.max(1,h-6)*S);if(runtime.state.completed&&e.hotspot_role==="exit"){ctx.shadowColor="#9cff57";ctx.shadowBlur=24;ctx.strokeStyle="#fff";ctx.strokeRect(x*S,y*S,w*S,h*S);ctx.shadowBlur=0;}if(selectedEntity===e.id)poly(e.hotspot_polygon,null,"#fff");}
+function render(){const g=ctx.createLinearGradient(0,0,0,canvas.height);g.addColorStop(0,"#07111f");g.addColorStop(.7,"#18304a");g.addColorStop(1,"#090b12");ctx.fillStyle=g;ctx.fillRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#20364a";ctx.fillRect(0,40*S,canvas.width,32*S);scene.entities.slice().sort((a,b)=>a.z_layer-b.z_layer).forEach(drawEntity);const p=runtime.state.player_position;ctx.fillStyle="#ffcf8b";ctx.fillRect((p[0]-2)*S,(p[1]-9)*S,4*S,9*S);ctx.fillStyle="#4e9cff";ctx.fillRect((p[0]-3)*S,(p[1]-5)*S,6*S,5*S);scene.occlusion_polygons.forEach(o=>poly(o.polygon,"#0a1424",null));if(debug){scene.walkboxes.forEach(w=>poly(w.polygon,"#28e7ff22","#28e7ff"));scene.collision_polygons.forEach(c=>poly(c.polygon,"#ff3b8144","#ff3b81"));}renderUi();}
+function button(parent,label,fn,cls=""){const b=document.createElement("button");b.textContent=label;if(cls)b.className=cls;b.addEventListener("click",fn);parent.append(b);}function run(action){const result=runtime.perform(action);say(result.message+(runtime.state.completed?" Raumziel erreicht!":""));if(result.success){selectedEntity=null;selectedItem=null;}render();}
+function renderUi(){actionsEl.replaceChildren();inventoryEl.querySelectorAll("button").forEach(e=>e.remove());for(const id of runtime.state.inventory){const item=game.adventure.inventory_items.find(x=>x.id===id);button(inventoryEl,item?item.name:id,()=>{selectedItem=id;say((item?item.name:id)+" ausgewählt.");render();},"item"+(selectedItem===id?" selected":""));}if(selectedEntity){const e=entities.get(selectedEntity);button(actionsEl,"Ansehen",()=>run({verb:"look_at",target_id:e.id}));if(e.hotspot_role==="npc")button(actionsEl,"Reden",()=>run({verb:"talk_to",target_id:e.id}));for(const i of game.runtime_rules.interactions.filter(x=>x.target_id===e.id)){if(i.verb==="take")button(actionsEl,"Nehmen",()=>run({verb:"take",target_id:e.id}));if(i.verb==="use"&&i.item_ids[0]===selectedItem)button(actionsEl,"Benutzen",()=>run({verb:"use",item_id:selectedItem,target_id:e.id}));}}
+for(const i of game.runtime_rules.interactions.filter(x=>x.verb==="combine"&&runtime.available().some(a=>a.interaction_id===x.id)&&(!selectedItem||x.item_ids.includes(selectedItem))))button(actionsEl,"Kombinieren: "+i.item_ids.join(" + "),()=>run({verb:"combine",first_id:i.item_ids[0],second_id:i.item_ids[1],container_id:i.target_id}));}
+canvas.addEventListener("click",event=>{const box=canvas.getBoundingClientRect(),p=[(event.clientX-box.left)/box.width*scene.size[0],(event.clientY-box.top)/box.height*scene.size[1]],hit=scene.entities.filter(e=>entityAvailable(e)&&PixelWorldCore.pointIn(p,e.hotspot_polygon)).sort((a,b)=>b.z_layer-a.z_layer||a.id.localeCompare(b.id))[0];if(hit){selectedEntity=hit.id;say(hit.name+" ausgewählt.");render();}else run({verb:"move_to",point:p});});document.querySelector("#debug-toggle").addEventListener("click",()=>{debug=!debug;render();});say(game.adventure.title);render();})().catch(error=>{document.querySelector("#status").textContent="Fehler: "+error.message;});
+'''
+
+# Compatibility alias for static source audits; executable files remain split.
+RUNTIME_TEMPLATE = RUNTIME_CORE + RUNTIME_UI
 
 PLACEHOLDER_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="128" height="72" shape-rendering="crispEdges"><rect width="128" height="72" fill="#07111f"/><path d="M0 40h128v32H0z" fill="#18304a"/><circle cx="64" cy="34" r="16" fill="#28e7ff" opacity=".65"/><path d="M48 54h32v14H48z" fill="#20364a"/></svg>"""
 
 
+def _atomic_text(path: Path, content: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def export_browser(game: dict, output: str | Path) -> list[str]:
+    del game  # game.json is the single safe data source used by the browser.
     output = Path(output)
     assets = output / "assets"
     assets.mkdir(parents=True, exist_ok=True)
-    runtime = RUNTIME_TEMPLATE.replace("__GAME_DATA__", json.dumps(game, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    files = {
-        output / "index.html": INDEX_HTML,
-        output / "runtime.js": runtime,
-        output / "styles.css": STYLES_CSS,
-        assets / "lab-placeholder.svg": PLACEHOLDER_SVG,
-        assets / "README.txt": "Own deterministic PixelWorld 0.6.3 placeholder assets. No external assets.\n",
-    }
+    files = {output / "index.html": INDEX_HTML, output / "runtime-core.js": RUNTIME_CORE, output / "runtime-core.cjs": RUNTIME_CORE, output / "runtime.js": RUNTIME_UI, output / "styles.css": STYLES_CSS, assets / "room-placeholder.svg": PLACEHOLDER_SVG, assets / "README.txt": "Own deterministic PixelWorld 0.6.3 placeholder assets. No external assets.\n"}
     for path, content in files.items():
-        path.write_text(content, encoding="utf-8")
+        _atomic_text(path, content)
     return [str(path.relative_to(output)).replace("\\", "/") for path in files]

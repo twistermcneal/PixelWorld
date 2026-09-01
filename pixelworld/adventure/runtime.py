@@ -1,5 +1,4 @@
-"""Deterministic, headless adventure runtime with validated save games."""
-
+"""Deterministic runtime with typed saves and atomic interactions."""
 from __future__ import annotations
 
 import json
@@ -8,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import SCHEMA_VERSION, VERBS
-from .navigation import shortest_route
+from .models import SCHEMA_VERSION, VERBS, validate_point, value_matches_type
+from .navigation import point_walkable, shortest_route
 
 
 @dataclass
@@ -21,15 +20,8 @@ class ActionResult:
     next_available_actions: list[dict[str, Any]]
     movement_path: list[list[float]] | None = None
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "success": self.success,
-            "message": self.message,
-            "state_changes": deepcopy(self.state_changes),
-            "animation_hint": self.animation_hint,
-            "next_available_actions": deepcopy(self.next_available_actions),
-            "movement_path": deepcopy(self.movement_path),
-        }
+    def as_dict(self):
+        return {"success": self.success, "message": self.message, "state_changes": deepcopy(self.state_changes), "animation_hint": self.animation_hint, "next_available_actions": deepcopy(self.next_available_actions), "movement_path": deepcopy(self.movement_path)}
 
 
 class AdventureRuntime:
@@ -37,19 +29,21 @@ class AdventureRuntime:
         self.game = deepcopy(game)
         self.scene = self.game["scene_graph"]
         self.rules = self.game["runtime_rules"]
+        self.state_schema = self.game["state_schema"]
         self.entity_by_id = {item["id"]: item for item in self.scene["entities"]}
-        self.inventory_ids = {item["id"] for item in self.game["adventure"]["inventory_items"]}
+        self.inventory_ids = set(self.state_schema["inventory_ids"])
         self.state = self._validate_state(state or self._new_state())
 
     def _new_state(self):
         state = deepcopy(self.scene["initial_state"])
-        state.update({"schema_version": SCHEMA_VERSION, "completed": False})
+        state.update({"schema_version": SCHEMA_VERSION, "game_digest": self.game["compile_digest"], "completed": False})
+        state["completed"] = self._ending_reached(state)
         return state
 
     def _validate_state(self, raw: Any) -> dict:
         if not isinstance(raw, dict):
             raise ValueError("runtime save must be an object")
-        required = {"schema_version", "player_position", "inventory", "objects", "objectives", "flags", "completed"}
+        required = {"schema_version", "game_digest", "player_position", "inventory", "objects", "objectives", "flags", "completed"}
         missing, unknown = required - raw.keys(), raw.keys() - required
         if missing:
             raise ValueError(f"runtime save is missing fields: {', '.join(sorted(missing))}")
@@ -57,34 +51,61 @@ class AdventureRuntime:
             raise ValueError(f"runtime save has unknown fields: {', '.join(sorted(unknown))}")
         if raw["schema_version"] != SCHEMA_VERSION:
             raise ValueError("runtime save has an unsupported schema_version")
-        position = raw["player_position"]
-        if not isinstance(position, list) or len(position) != 2 or any(not isinstance(n, (int, float)) or isinstance(n, bool) for n in position):
-            raise ValueError("runtime save player_position must contain two numbers")
-        if not isinstance(raw["inventory"], list) or any(item not in self.inventory_ids for item in raw["inventory"]):
+        if raw["game_digest"] != self.game["compile_digest"]:
+            raise ValueError("runtime save belongs to a different compiled game")
+        position = validate_point(raw["player_position"], "runtime save player_position")
+        collisions = [item["polygon"] for item in self.scene["collision_polygons"]]
+        if not point_walkable(position, self.scene["walkboxes"], collisions):
+            raise ValueError("runtime save player_position is not walkable")
+        if not isinstance(raw["inventory"], list) or any(not isinstance(item, str) or item not in self.inventory_ids for item in raw["inventory"]):
             raise ValueError("runtime save contains an unknown inventory item")
-        if len(raw["inventory"]) != len(set(raw["inventory"])):
-            raise ValueError("runtime save inventory contains duplicates")
-        expected_objects = set(self.scene["initial_state"]["objects"])
-        if not isinstance(raw["objects"], dict) or set(raw["objects"]) != expected_objects:
-            raise ValueError("runtime save object namespace does not match the game")
-        expected_objectives = set(self.scene["initial_state"]["objectives"])
-        if not isinstance(raw["objectives"], dict) or set(raw["objectives"]) != expected_objectives:
-            raise ValueError("runtime save objective namespace does not match the game")
-        if not isinstance(raw["flags"], dict) or not isinstance(raw["completed"], bool):
-            raise ValueError("runtime save flags/completed have invalid types")
+        if raw["inventory"] != sorted(set(raw["inventory"])):
+            raise ValueError("runtime save inventory must be sorted and unique")
+        self._validate_namespace(raw["objects"], self.state_schema["objects"], "objects")
+        self._validate_namespace(raw["objectives"], self.state_schema["objectives"], "objectives")
+        self._validate_flat_namespace(raw["flags"], self.state_schema["flags"], "flags")
+        if not isinstance(raw["completed"], bool):
+            raise ValueError("runtime save completed must be a boolean")
+        calculated = self._ending_reached(raw)
+        if raw["completed"] is not calculated:
+            raise ValueError("runtime save completed does not match ending conditions")
         return deepcopy(raw)
 
+    def _validate_namespace(self, values, schema, label):
+        if not isinstance(values, dict) or set(values) != set(schema):
+            raise ValueError(f"runtime save {label} IDs do not match the game")
+        for identifier, fields in schema.items():
+            item = values[identifier]
+            if not isinstance(item, dict) or set(item) != set(fields):
+                raise ValueError(f"runtime save {label}.{identifier} fields do not match the game")
+            for field, expected in fields.items():
+                if not value_matches_type(item[field], expected):
+                    raise ValueError(f"runtime save {label}.{identifier}.{field} must have exact JSON type {expected}")
+
+    def _validate_flat_namespace(self, values, schema, label):
+        if not isinstance(values, dict) or set(values) != set(schema):
+            raise ValueError(f"runtime save {label} IDs do not match the game")
+        for identifier, expected in schema.items():
+            if not value_matches_type(values[identifier], expected):
+                raise ValueError(f"runtime save {label}.{identifier} must have exact JSON type {expected}")
+
     def save_json(self, path: str | Path | None = None) -> str:
-        text = json.dumps(self.state, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        text = json.dumps(self.state, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
         if path is not None:
-            Path(path).write_text(text, encoding="utf-8")
+            destination = Path(path)
+            temporary = destination.with_name(destination.name + ".tmp")
+            temporary.write_text(text, encoding="utf-8")
+            temporary.replace(destination)
         return text
 
     @classmethod
     def load_json(cls, game: dict, source: str | Path):
-        path = Path(source)
-        text = path.read_text(encoding="utf-8") if path.is_file() else str(source)
-        return cls(game, json.loads(text))
+        if isinstance(source, Path):
+            text = source.read_text(encoding="utf-8")
+        else:
+            candidate = str(source)
+            text = candidate if candidate.lstrip().startswith("{") else Path(candidate).read_text(encoding="utf-8")
+        return cls(game, json.loads(text, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON value {value}"))))
 
     @property
     def completed(self):
@@ -92,15 +113,15 @@ class AdventureRuntime:
 
     def move_to(self, point) -> ActionResult:
         try:
-            route = shortest_route(
-                self.state["player_position"], point, self.scene["walkboxes"],
-                self.scene["navigation_edges"], self.scene["collision_polygons"],
-            )
-        except ValueError as error:
+            route = shortest_route(self.state["player_position"], point, self.scene["walkboxes"], self.scene["navigation_edges"], self.scene["collision_polygons"])
+            candidate = deepcopy(self.state)
+            before = candidate["player_position"]
+            candidate["player_position"] = route[-1]
+            candidate = self._validate_state(candidate)
+        except (ValueError, TypeError) as error:
             return self._result(False, str(error), [], "none")
-        old = self.state["player_position"]
-        self.state["player_position"] = route[-1]
-        return self._result(True, "Ziel erreicht.", [{"path": "player_position", "before": old, "after": route[-1]}], "walk", route)
+        self.state = candidate
+        return self._result(True, "Ziel erreicht.", [{"path": "player_position", "before": before, "after": route[-1]}], "walk", route)
 
     def look_at(self, target_id: str) -> ActionResult:
         entity = self.entity_by_id.get(target_id)
@@ -110,10 +131,9 @@ class AdventureRuntime:
 
     def talk_to(self, target_id: str) -> ActionResult:
         entity = self.entity_by_id.get(target_id)
-        if entity is None or entity["hotspot_role"] != "npc" or not self._entity_available(entity):
+        if entity is None or entity["hotspot_role"] != "npc" or not self._entity_available(entity) or not entity["default_talk_text"]:
             return self._result(False, "Damit kann man nicht sprechen.", [], "none")
-        message = "Knallbert: Zwei Reagenzien, eine Flasche – dann ab damit in die Maschine!"
-        return self._result(True, message, [], "talk")
+        return self._result(True, entity["default_talk_text"], [], "talk")
 
     def take(self, target_id: str) -> ActionResult:
         return self._invoke("take", target_id, [])
@@ -122,9 +142,13 @@ class AdventureRuntime:
         return self._invoke("use", target_id, [item_id])
 
     def combine(self, first_id: str, second_id: str, container_id: str) -> ActionResult:
+        if not all(isinstance(item, str) for item in (first_id, second_id, container_id)):
+            return self._result(False, "Ungültige Kombinationsparameter.", [], "none")
         return self._invoke("combine", container_id, sorted([first_id, second_id]))
 
     def perform(self, action: dict) -> ActionResult:
+        if not isinstance(action, dict):
+            return self._result(False, "Aktion muss ein Objekt sein.", [], "none")
         verb = action.get("verb")
         if verb not in VERBS:
             return self._result(False, f"Unzulässiges Verb: {verb!r}.", [], "none")
@@ -140,113 +164,98 @@ class AdventureRuntime:
             return self.use(action.get("item_id"), action.get("target_id"))
         return self.combine(action.get("first_id"), action.get("second_id"), action.get("container_id"))
 
-    def _invoke(self, verb: str, target_id: str, item_ids: list[str]) -> ActionResult:
+    def _invoke(self, verb, target_id, item_ids):
         entity = self.entity_by_id.get(target_id)
-        if entity is None or not (self._entity_available(entity) or (verb == "combine" and target_id in self.state["inventory"])):
+        target_available = entity and (self._entity_available(entity) or (verb == "combine" and target_id in self.state["inventory"]))
+        if not target_available:
             return self._result(False, "Ziel ist nicht verfügbar.", [], "none")
-        desired = sorted(item_ids)
-        candidates = [item for item in self.rules["interactions"] if item["verb"] == verb and item["target_id"] == target_id and sorted(item["item_ids"]) == desired]
+        candidates = [item for item in self.rules["interactions"] if item["verb"] == verb and item["target_id"] == target_id and sorted(item["item_ids"]) == sorted(item_ids)]
         if not candidates:
             return self._result(False, "Diese Kombination funktioniert nicht.", [], "none")
-        interaction = sorted(candidates, key=lambda item: item["id"])[0]
-        if not all(self._condition(condition) for condition in interaction["conditions"]):
-            return self._result(False, "Dafür fehlen noch Voraussetzungen.", [], "none")
-        if verb == "combine" and target_id in self.state["inventory"]:
-            route = [list(self.state["player_position"])]
-        else:
-            try:
-                route = shortest_route(self.state["player_position"], entity["walk_to_point"], self.scene["walkboxes"], self.scene["navigation_edges"], self.scene["collision_polygons"])
-            except ValueError:
-                return self._result(False, "Das Ziel ist nicht erreichbar.", [], "none")
-        changes = []
-        old_position = self.state["player_position"]
-        self.state["player_position"] = route[-1]
-        if old_position != route[-1]:
-            changes.append({"path": "player_position", "before": old_position, "after": route[-1]})
-        for effect in interaction["effects"]:
-            changes.append(self._apply_effect(effect))
-        self.state["completed"] = self._ending_reached()
-        if self.state["completed"]:
-            changes.append({"path": "completed", "before": False, "after": True})
+        interaction = min(candidates, key=lambda item: item["id"])
+        try:
+            if not all(self._condition(condition, self.state) for condition in interaction["conditions"]):
+                return self._result(False, "Dafür fehlen noch Voraussetzungen.", [], "none")
+            route = [list(self.state["player_position"])] if verb == "combine" and target_id in self.state["inventory"] else shortest_route(self.state["player_position"], entity["walk_to_point"], self.scene["walkboxes"], self.scene["navigation_edges"], self.scene["collision_polygons"])
+            candidate = deepcopy(self.state)
+            changes = []
+            if candidate["player_position"] != route[-1]:
+                changes.append({"path": "player_position", "before": candidate["player_position"], "after": route[-1]})
+                candidate["player_position"] = route[-1]
+            for effect in interaction["effects"]:
+                changes.append(self._apply_effect(effect, candidate))
+            before_completed = candidate["completed"]
+            candidate["completed"] = self._ending_reached(candidate)
+            if before_completed != candidate["completed"]:
+                changes.append({"path": "completed", "before": before_completed, "after": candidate["completed"]})
+            candidate = self._validate_state(candidate)
+        except (ValueError, TypeError, KeyError) as error:
+            return self._result(False, f"Interaktion abgebrochen: {error}", [], "none")
+        self.state = candidate
         return self._result(True, interaction["text"], changes, interaction["animation_hint"], route)
 
     def _entity_available(self, entity):
-        state = self.state["objects"].get(entity["id"], {})
+        state = self.state["objects"][entity["id"]]
         return entity["visible"] and entity["enabled"] and not state.get("taken", False)
 
-    def _condition(self, condition):
-        op, path, expected = condition["op"], condition["path"], condition["value"]
-        if op == "equals":
-            return self._read_path(path) == expected
-        if path != "inventory":
-            raise ValueError(f"inventory operation requires inventory path, got {path!r}")
-        if op == "inventory_contains":
-            return expected in self.state["inventory"]
-        if op == "inventory_missing":
-            return expected not in self.state["inventory"]
-        raise ValueError(f"unsupported condition operation {op!r}")
+    def _condition(self, condition, state):
+        if condition["op"] == "equals":
+            return self._read_path(condition["path"], state) == condition["value"] and type(self._read_path(condition["path"], state)) is type(condition["value"])
+        inventory = state["inventory"]
+        return condition["value"] in inventory if condition["op"] == "inventory_contains" else condition["value"] not in inventory
 
-    def _apply_effect(self, effect):
+    def _apply_effect(self, effect, state):
         op, path, value = effect["op"], effect["path"], effect["value"]
         if op == "set":
-            before = deepcopy(self._read_path(path))
-            self._write_path(path, deepcopy(value))
+            before = deepcopy(self._read_path(path, state))
+            self._write_path(path, deepcopy(value), state)
             return {"path": path, "before": before, "after": deepcopy(value)}
         if path != "inventory":
             raise ValueError(f"inventory operation requires inventory path, got {path!r}")
-        before = list(self.state["inventory"])
+        before = list(state["inventory"])
         if op == "inventory_add":
             if value not in self.inventory_ids:
                 raise ValueError(f"unknown inventory item {value!r}")
-            if value not in self.state["inventory"]:
-                self.state["inventory"].append(value)
-                self.state["inventory"].sort()
+            if value in state["inventory"]:
+                raise ValueError(f"inventory item {value!r} already exists")
+            state["inventory"].append(value)
+            state["inventory"].sort()
         elif op == "inventory_remove":
-            if value not in self.state["inventory"]:
+            if value not in state["inventory"]:
                 raise ValueError(f"cannot remove missing inventory item {value!r}")
-            self.state["inventory"].remove(value)
+            state["inventory"].remove(value)
         else:
             raise ValueError(f"unsupported effect operation {op!r}")
-        return {"path": path, "before": before, "after": list(self.state["inventory"])}
+        return {"path": path, "before": before, "after": list(state["inventory"])}
 
-    def _read_path(self, path):
-        parts = path.split(".")
-        if parts[0] not in {"objects", "objectives", "flags"} or len(parts) < 2:
-            raise ValueError(f"state path {path!r} is not allowed")
-        value = self.state
-        for part in parts:
+    def _read_path(self, path, state):
+        value = state
+        for part in path.split("."):
             if not isinstance(value, dict) or part not in value:
-                if parts[0] == "flags":
-                    return None
                 raise ValueError(f"state path {path!r} does not exist")
             value = value[part]
         return value
 
-    def _write_path(self, path, value):
+    def _write_path(self, path, value, state):
         parts = path.split(".")
-        if parts[0] not in {"objects", "objectives", "flags"} or len(parts) < 2:
-            raise ValueError(f"state path {path!r} is not allowed")
-        target = self.state
+        target = state
         for part in parts[:-1]:
-            if part not in target or not isinstance(target[part], dict):
+            if not isinstance(target, dict) or part not in target:
                 raise ValueError(f"state path {path!r} does not exist")
             target = target[part]
-        if parts[-1] not in target and parts[0] != "flags":
+        if parts[-1] not in target:
             raise ValueError(f"state path {path!r} does not exist")
         target[parts[-1]] = value
 
-    def _ending_reached(self):
-        return any(all(self._condition(condition) for condition in ending["conditions"]) for ending in self.rules["ending_conditions"])
+    def _ending_reached(self, state):
+        return any(all(self._condition(condition, state) for condition in ending["conditions"]) for ending in self.rules["ending_conditions"])
 
     def available_actions(self):
         actions = []
         for interaction in sorted(self.rules["interactions"], key=lambda item: item["id"]):
             entity = self.entity_by_id.get(interaction["target_id"])
-            target_available = entity and (
-                self._entity_available(entity)
-                or (interaction["verb"] == "combine" and interaction["target_id"] in self.state["inventory"])
-            )
-            if target_available and all(self._condition(condition) for condition in interaction["conditions"]):
+            available = entity and (self._entity_available(entity) or (interaction["verb"] == "combine" and interaction["target_id"] in self.state["inventory"]))
+            if available and all(self._condition(condition, self.state) for condition in interaction["conditions"]):
                 actions.append({"interaction_id": interaction["id"], "verb": interaction["verb"], "target_id": interaction["target_id"], "item_ids": list(interaction["item_ids"])})
         return actions
 
