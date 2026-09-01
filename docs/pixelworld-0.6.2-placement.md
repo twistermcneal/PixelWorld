@@ -131,3 +131,30 @@ Konfliktraten und aufgabenspezifische Gradientennormen. Checkpoints tragen
 `split_placement_queries=true` und eine versionierte `query_schema_version`; sie
 sind nicht mit D-, PCGrad- oder QDET-Checkpoints austauschbar. Vollständige
 Trainingsläufe bedürfen einer gesonderten Freigabe.
+
+### Split-Query-Tether
+
+`D-SPLIT-TETHER` (`--gradient-mode split-tether`) basiert exakt auf
+`D-SPLIT-MEASURE`, verwendet keine PCGrad-Projektion und wertet bei der Inferenz
+direkt die trainierten Placement-Queries aus. Zusätzlich gilt mit dem fest
+vorgegebenen, nicht adaptiven Gewicht `QUERY_TETHER_WEIGHT = 1.0`:
+
+```python
+L_query = ((placement_slot_queries - slot_queries.weight.detach()) ** 2).mean()
+L_total_tether = L_total + 1.0 * L_query
+```
+
+Der Stop-Gradient schützt Attribute-Queries und Attributpfad. Pro Epoche werden
+ungewichteter und gewichteter Tether-Loss, L2-/RMS-/mittlerer/maximaler
+Query-Abstand, die Tether-Gradientennorm sowie deren Verhältnisse zu diskretem
+Placement- und Offsetgradient protokolliert. Die bestehende paarweise
+Konfliktmessung bleibt erhalten.
+
+Vor jedem Tether-Lauf wird nach einem deterministischen ersten Optimizer-Schritt
+auf Batch zwei kontrolliert, dass der Tether-Gradient endlich und positiv ist und
+weder 50 Prozent der kombinierten Region+Anchor-Gradientnorm noch 50 Prozent der
+Offset-Gradientnorm auf den Placement-Queries überschreitet. Bei Verletzung wird
+vor dem eigentlichen Lauf abgebrochen. Checkpoints speichern Modus, Split-Schema,
+festes Tether-Gewicht, Parameterzahl und Target-Digest. Ein vollständiger
+`14.000 x 45`-Lauf erfordert eine gesonderte Freigabe; andere Gewichte oder Seeds
+dürfen nicht automatisch ausprobiert werden.

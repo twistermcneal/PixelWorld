@@ -18,8 +18,10 @@ VARIANTS = ("A", "B", "C", "D", "E")
 OFFSET_VARIANTS = ("C", "D", "E")
 GRADIENT_MODES = (
     "standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad", "split-measure",
+    "split-tether",
 )
 SPLIT_QUERY_SCHEMA_VERSION = 1
+QUERY_TETHER_WEIGHT = 1.0
 OFFSET_RADII = (8, 12, 16)
 AUXILIARY_LOSS_WEIGHT = 0.25
 OFFSET_LOSS_WEIGHT = 0.5
@@ -41,6 +43,7 @@ class PlacementConfig:
     num_workers: int = 0
     evaluation_seeds: tuple[int, ...] = field(default_factory=lambda: DEFAULT_EVALUATION_SEEDS)
     gradient_mode: str = "standard"
+    query_tether_weight: float = QUERY_TETHER_WEIGHT
 
     def validate(self):
         if self.version != VERSION:
@@ -67,6 +70,8 @@ class PlacementConfig:
             raise ValueError("PixelWorld 0.6.2 requires num_workers=0")
         if not self.evaluation_seeds:
             raise ValueError("evaluation_seeds must not be empty")
+        if self.query_tether_weight != QUERY_TETHER_WEIGHT:
+            raise ValueError(f"PixelWorld 0.6.2 split tether requires query_tether_weight={QUERY_TETHER_WEIGHT}")
         return self
 
     @property
@@ -99,6 +104,10 @@ class PlacementConfig:
         if self.splits_placement_queries:
             data["split_placement_queries"] = True
             data["query_schema_version"] = SPLIT_QUERY_SCHEMA_VERSION
+        if self.uses_query_tether:
+            data["query_tether_weight"] = self.query_tether_weight
+        else:
+            data.pop("query_tether_weight", None)
         data["seeds"] = {
             "python": self.seed,
             "numpy": self.seed,
@@ -112,6 +121,7 @@ class PlacementConfig:
     def measures_gradient_conflicts(self):
         return self.gradient_mode in (
             "measure", "pcgrad", "qdet-measure", "qdet-pcgrad", "split-measure",
+            "split-tether",
         )
 
     @property
@@ -124,7 +134,11 @@ class PlacementConfig:
 
     @property
     def splits_placement_queries(self):
-        return self.gradient_mode == "split-measure"
+        return self.gradient_mode in ("split-measure", "split-tether")
+
+    @property
+    def uses_query_tether(self):
+        return self.gradient_mode == "split-tether"
 
     @classmethod
     def from_dict(cls, data):
@@ -138,6 +152,7 @@ class PlacementConfig:
         ):
             values.pop(name, None)
         values["evaluation_seeds"] = tuple(values["evaluation_seeds"])
+        values.setdefault("query_tether_weight", QUERY_TETHER_WEIGHT)
         return cls(**values).validate()
 
 

@@ -39,7 +39,7 @@ def build_parser():
         "--gradient-mode",
         choices=(
             "standard", "measure", "pcgrad", "qdet-measure", "qdet-pcgrad",
-            "split-measure",
+            "split-measure", "split-tether",
         ),
         default="standard",
         help="D-only gradient conflict ablation mode",

@@ -1,7 +1,7 @@
 import csv
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +34,7 @@ from pixelworld.training import masked_ce, ordinal_loss, resolve_device, seed_ev
 
 from .config import (
     LAYOUT_DIM,
+    QUERY_TETHER_WEIGHT,
     SHARED_TARGET_SHA256,
     SPLIT_QUERY_SCHEMA_VERSION,
     SLOT_LATENT_DIM,
@@ -150,6 +151,14 @@ def compute_losses(model, batch, config, device, coord_values, ce, bce):
         + action_loss
         + trigger_loss
     )
+    query_tether_loss = torch.zeros((), device=device)
+    weighted_query_tether_loss = torch.zeros((), device=device)
+    if config.uses_query_tether:
+        query_tether_loss = (
+            model.placement_slot_queries - model.slot_queries.weight.detach()
+        ).square().mean()
+        weighted_query_tether_loss = config.query_tether_weight * query_tether_loss
+        loss = loss + weighted_query_tether_loss
     return {
         "loss": loss,
         "terrain_loss": terrain_loss,
@@ -162,6 +171,8 @@ def compute_losses(model, batch, config, device, coord_values, ce, bce):
         "class_loss": class_loss,
         "action_loss": action_loss,
         "trigger_loss": trigger_loss,
+        "query_tether_loss": query_tether_loss,
+        "weighted_query_tether_loss": weighted_query_tether_loss,
     }
 
 
@@ -205,6 +216,18 @@ SPLIT_CONFLICT_METRIC_FIELDS = tuple(
     f"gradient_{group}_{task}_norm_mean"
     for group in SPLIT_CONFLICT_GROUPS
     for task in ("region", "anchor", "offset", "discrete")
+)
+
+TETHER_METRIC_FIELDS = (
+    "query_tether_loss",
+    "weighted_query_tether_loss",
+    "query_distance_l2",
+    "query_distance_rms",
+    "query_distance_mean_abs",
+    "query_distance_max_abs",
+    "gradient_queries_tether_norm_mean",
+    "gradient_queries_tether_discrete_ratio_mean",
+    "gradient_queries_tether_offset_ratio_mean",
 )
 
 
@@ -315,6 +338,10 @@ def split_gradient_conflict_backward(model, losses):
          (torch.zeros_like(gr) if ga is None else ga))
         for gr, ga in zip(gradients["region"], gradients["anchor"])
     )
+    if "weighted_query_tether_loss" in losses and losses["weighted_query_tether_loss"].requires_grad:
+        gradients["tether"] = torch.autograd.grad(
+            losses["weighted_query_tether_loss"], shared, retain_graph=True, allow_unused=True
+        )
     stats = {}
     slices = []
     index = 0
@@ -333,6 +360,16 @@ def split_gradient_conflict_backward(model, losses):
             values = [gradient for gradient in gradients[task][selected] if gradient is not None]
             squared = sum(gradient.square().sum() for gradient in values)
             stats[f"{group}_{task}_norm"] = float(squared.sqrt()) if values else 0.0
+    if "tether" in gradients:
+        query_slice = slices[2][1]
+        tether_values = [g for g in gradients["tether"][query_slice] if g is not None]
+        tether_squared = sum(g.square().sum() for g in tether_values)
+        tether_norm = float(tether_squared.sqrt()) if tether_values else 0.0
+        discrete_norm = stats["queries_discrete_norm"]
+        offset_norm = stats["queries_offset_norm"]
+        stats["queries_tether_norm"] = tether_norm
+        stats["queries_tether_discrete_ratio"] = tether_norm / max(discrete_norm, 1e-12)
+        stats["queries_tether_offset_ratio"] = tether_norm / max(offset_norm, 1e-12)
     losses["loss"].backward()
     return stats
 
@@ -378,6 +415,64 @@ def summarize_split_conflict_batches(records):
             result[f"gradient_{group}_{task}_norm_mean"] = float(
                 np.mean([item[f"{group}_{task}_norm"] for item in records])
             )
+    if "queries_tether_norm" in records[0]:
+        for name in (
+            "queries_tether_norm", "queries_tether_discrete_ratio",
+            "queries_tether_offset_ratio",
+        ):
+            result[f"gradient_{name}_mean"] = float(np.mean([item[name] for item in records]))
+    return result
+
+
+def query_distance_metrics(model):
+    difference = (
+        model.placement_slot_queries.detach() - model.slot_queries.weight.detach()
+    ).float()
+    return {
+        "query_distance_l2": float(torch.linalg.vector_norm(difference)),
+        "query_distance_rms": float(difference.square().mean().sqrt()),
+        "query_distance_mean_abs": float(difference.abs().mean()),
+        "query_distance_max_abs": float(difference.abs().max()),
+    }
+
+
+def query_tether_safety_check(config, device):
+    """Measure the fixed tether on batch two after one deterministic update."""
+    if not config.uses_query_tether:
+        return None
+    safety_config = replace(config, samples=max(2 * config.batch_size, 8), epochs=1)
+    objects = initialize_training(safety_config, device, progress=None)
+    iterator = iter(objects.loader)
+    first = compute_losses(
+        objects.model, next(iterator), safety_config, device,
+        objects.coord_values, objects.ce, objects.bce,
+    )
+    objects.optimizer.zero_grad()
+    split_gradient_conflict_backward(objects.model, first)
+    objects.optimizer.step()
+    second = compute_losses(
+        objects.model, next(iterator), safety_config, device,
+        objects.coord_values, objects.ce, objects.bce,
+    )
+    objects.optimizer.zero_grad()
+    stats = split_gradient_conflict_backward(objects.model, second)
+    result = {
+        "batch": 2,
+        "query_tether_weight": config.query_tether_weight,
+        "query_tether_loss": float(second["query_tether_loss"].detach()),
+        "tether_gradient_norm": stats["queries_tether_norm"],
+        "discrete_gradient_norm": stats["queries_discrete_norm"],
+        "offset_gradient_norm": stats["queries_offset_norm"],
+        "tether_to_discrete_ratio": stats["queries_tether_discrete_ratio"],
+        "tether_to_offset_ratio": stats["queries_tether_offset_ratio"],
+    }
+    numeric = tuple(result.values())[2:]
+    if not all(np.isfinite(value) for value in numeric) or result["tether_gradient_norm"] <= 0:
+        raise RuntimeError("Split-query tether safety check produced a non-finite or zero gradient")
+    if result["tether_to_discrete_ratio"] > 0.5 or result["tether_to_offset_ratio"] > 0.5:
+        raise RuntimeError(
+            "Split-query tether safety check exceeded the 50% gradient-norm limit"
+        )
     return result
 
 
@@ -442,6 +537,8 @@ def train_one_epoch(objects, config, device):
         "action_loss",
         "trigger_loss",
     )
+    if config.uses_query_tether:
+        names += ("query_tether_loss", "weighted_query_tether_loss")
     totals = {name: 0.0 for name in names}
     batches = 0
     conflict_batches = []
@@ -484,6 +581,8 @@ def train_one_epoch(objects, config, device):
             if config.splits_placement_queries
             else summarize_conflict_batches(conflict_batches)
         )
+    if config.uses_query_tether:
+        result.update(query_distance_metrics(objects.model))
     return result
 
 
@@ -549,7 +648,7 @@ HISTORY_FIELDS = (
     "trigger_loss",
     "epoch_seconds",
     "learning_rate",
-) + CONFLICT_METRIC_FIELDS + SPLIT_CONFLICT_METRIC_FIELDS
+) + CONFLICT_METRIC_FIELDS + SPLIT_CONFLICT_METRIC_FIELDS + TETHER_METRIC_FIELDS
 
 
 def write_history(store, history):
@@ -572,6 +671,9 @@ def checkpoint_payload(objects, config, history, completed_epochs, timings, prov
         "split_placement_queries": config.splits_placement_queries,
         "query_schema_version": (
             SPLIT_QUERY_SCHEMA_VERSION if config.splits_placement_queries else None
+        ),
+        "query_tether_weight": (
+            config.query_tether_weight if config.uses_query_tether else None
         ),
         "model_parameters": sum(parameter.numel() for parameter in objects.model.parameters()),
         "slot_latent_dim": SLOT_LATENT_DIM,
@@ -607,6 +709,9 @@ def load_checkpoint(path, config, device, with_optimizer=False):
     expected_schema = SPLIT_QUERY_SCHEMA_VERSION if config.splits_placement_queries else None
     if payload.get("query_schema_version") != expected_schema:
         raise ValueError("Checkpoint query schema is incompatible with the requested run")
+    expected_tether = config.query_tether_weight if config.uses_query_tether else None
+    if payload.get("query_tether_weight") != expected_tether:
+        raise ValueError("Checkpoint query tether weight is incompatible with the requested run")
     model = create_model(
         config.variant,
         detach_placement_queries=config.detaches_placement_queries,
@@ -630,6 +735,9 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
         torch.cuda.reset_peak_memory_stats(selected_device)
     wall_started = time.perf_counter()
     try:
+        safety = query_tether_safety_check(config, selected_device)
+        if safety:
+            store.log(f"Split-query tether safety check: {json.dumps(safety, sort_keys=True)}")
         objects = initialize_training(config, selected_device, store.log)
         provenance = environment_provenance(
             store.repository_root,
@@ -643,6 +751,7 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
                 "placement_config": config.to_dict(),
                 "shared_target_sha256": SHARED_TARGET_SHA256,
                 "evaluation_seeds": list(config.evaluation_seeds),
+                "query_tether_safety": safety,
             }
         )
         history = []
@@ -666,6 +775,9 @@ def run_training(store, device=None, resume=False, stop_after_epoch=None):
             expected_schema = SPLIT_QUERY_SCHEMA_VERSION if config.splits_placement_queries else None
             if payload.get("query_schema_version") != expected_schema:
                 raise ValueError("Incompatible recovery checkpoint query schema")
+            expected_tether = config.query_tether_weight if config.uses_query_tether else None
+            if payload.get("query_tether_weight") != expected_tether:
+                raise ValueError("Incompatible recovery checkpoint query tether weight")
             if payload.get("slot_latent_dim") != SLOT_LATENT_DIM or payload.get("layout_dim") != LAYOUT_DIM:
                 raise ValueError("Incompatible recovery checkpoint latent schema")
             objects.model.load_state_dict(payload["model_state_dict"])

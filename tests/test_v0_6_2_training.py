@@ -9,6 +9,7 @@ from pixelworld.evaluation import METRIC_NAMES
 from pixelworld.training import seed_everything
 from pixelworld.config import DEFAULT_EVALUATION_SEEDS
 from pixelworld.versions.v0_6_2.config import (
+    QUERY_TETHER_WEIGHT,
     SHARED_TARGET_SHA256,
     SPLIT_QUERY_SCHEMA_VERSION,
     PlacementConfig,
@@ -31,6 +32,7 @@ from pixelworld.versions.v0_6_2.training import (
     initialize_training,
     load_checkpoint,
     project_conflicting_gradients,
+    query_tether_safety_check,
     run_training,
     train_one_epoch,
 )
@@ -309,6 +311,95 @@ def test_split_measure_records_finite_pairwise_conflicts():
     assert all(torch.isfinite(torch.tensor(record[name])) for name in expected)
 
 
+def test_split_tether_starts_at_zero_with_forward_parity():
+    measure_cfg = gradient_config("split-measure")
+    tether_cfg = gradient_config("split-tether")
+    measured = initialize_training(measure_cfg, "cpu", progress=None)
+    tethered = initialize_training(tether_cfg, "cpu", progress=None)
+    assert all(torch.equal(t, tethered.model.state_dict()[name])
+               for name, t in measured.model.state_dict().items())
+    x = torch.randn(3, 81)
+    measured.model.eval(); tethered.model.eval()
+    assert all(torch.equal(a, b) for a, b in zip(measured.model(x), tethered.model(x)))
+    losses = compute_losses(
+        tethered.model, next(iter(tethered.loader)), tether_cfg, "cpu",
+        tethered.coord_values, tethered.ce, tethered.bce,
+    )
+    assert losses["query_tether_loss"].item() == 0.0
+    assert losses["weighted_query_tether_loss"].item() == 0.0
+
+
+def test_tether_gradient_updates_only_placement_queries():
+    model = create_model("D", split_placement_queries=True)
+    with torch.no_grad():
+        model.placement_slot_queries.add_(0.1)
+    before = model_state(model)
+    tether = (model.placement_slot_queries - model.slot_queries.weight.detach()).square().mean()
+    tether.backward()
+    assert model.placement_slot_queries.grad is not None
+    assert float(model.placement_slot_queries.grad.norm()) > 0
+    assert model.slot_queries.weight.grad is None
+    for name, parameter in model.named_parameters():
+        if name != "placement_slot_queries":
+            assert parameter.grad is None, name
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
+    optimizer.step()
+    after = model_state(model)
+    assert not torch.equal(before["placement_slot_queries"], after["placement_slot_queries"])
+    for name in before:
+        if name != "placement_slot_queries":
+            assert torch.equal(before[name], after[name]), name
+
+
+def test_split_tether_preserves_foreign_paths_and_attribute_logits():
+    measure_cfg = gradient_config("split-measure")
+    tether_cfg = gradient_config("split-tether")
+    measured = initialize_training(measure_cfg, "cpu", progress=None)
+    train_one_epoch(measured, measure_cfg, "cpu")
+    tethered = initialize_training(tether_cfg, "cpu", progress=None)
+    train_one_epoch(tethered, tether_cfg, "cpu")
+    left, right = model_state(measured.model), model_state(tethered.model)
+    placement = (
+        "placement_slot_queries", "placement_encoder.", "placement_decoder.",
+        "region_head.", "anchor_head.", "offset_head.",
+    )
+    for name in left:
+        if not name.startswith(placement):
+            assert torch.equal(left[name], right[name]), name
+    x = torch.randn(4, 81)
+    measured.model.eval(); tethered.model.eval()
+    a, b = measured.model(x), tethered.model(x)
+    for index in (5, 6, 7, 8):
+        assert torch.equal(a[index], b[index])
+
+
+def test_split_tether_safety_ratios_are_finite_and_bounded():
+    result = query_tether_safety_check(gradient_config("split-tether"), "cpu")
+    assert result["batch"] == 2
+    assert result["query_tether_weight"] == QUERY_TETHER_WEIGHT
+    assert result["tether_gradient_norm"] > 0
+    assert all(torch.isfinite(torch.tensor(value)) for value in result.values())
+    assert result["tether_to_discrete_ratio"] <= 0.5
+    assert result["tether_to_offset_ratio"] <= 0.5
+
+
+def test_split_tether_uses_one_optimizer_step_per_batch(monkeypatch):
+    cfg = gradient_config("split-tether")
+    objects = initialize_training(cfg, "cpu", progress=None)
+    calls = 0
+    original = objects.optimizer.step
+    def counted_step(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(objects.optimizer, "step", counted_step)
+    record = train_one_epoch(objects, cfg, "cpu")
+    assert calls == record["batches"]
+    for name, value in record.items():
+        if name not in ("epoch_seconds",):
+            assert torch.isfinite(torch.tensor(value)), name
+
+
 def test_variant_e_auxiliary_head_updates_placement_path():
     model = create_model("E")
     model(torch.zeros(2, 81))[10].sum().backward()
@@ -391,6 +482,26 @@ def test_split_checkpoint_records_schema_and_rejects_non_split(tmp_path):
         load_checkpoint(incompatible, cfg, "cpu")
 
 
+def test_split_tether_checkpoint_records_weight_and_rejects_tampering(tmp_path):
+    cfg = gradient_config("split-tether")
+    store = PlacementRunStore.create(tmp_path, cfg, "checkpoint-split-tether")
+    run_training(store, device="cpu")
+    _, payload = load_checkpoint(store.path / "final.pt", cfg, "cpu")
+    assert payload["gradient_mode"] == "split-tether"
+    assert payload["split_placement_queries"] is True
+    assert payload["query_tether_weight"] == QUERY_TETHER_WEIGHT
+    assert payload["config"]["query_tether_weight"] == QUERY_TETHER_WEIGHT
+    assert payload["provenance"]["query_tether_safety"]["batch"] == 2
+    assert "query_tether_loss" in payload["training_history"][0]
+    payload["query_tether_weight"] = 0.5
+    incompatible = tmp_path / "incompatible-tether-weight.pt"
+    torch.save(payload, incompatible)
+    with pytest.raises(ValueError, match="tether weight"):
+        load_checkpoint(incompatible, cfg, "cpu")
+    with pytest.raises(ValueError, match="gradient mode"):
+        load_checkpoint(store.path / "final.pt", gradient_config("split-measure"), "cpu")
+
+
 def test_gradient_mode_resume_parity_including_statistics(tmp_path):
     cfg = gradient_config("pcgrad", epochs=2)
     continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-pcgrad")
@@ -430,6 +541,23 @@ def test_split_resume_parity_including_conflict_statistics(tmp_path):
     continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-split")
     run_training(continuous, device="cpu")
     resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-split")
+    run_training(resumed, device="cpu", stop_after_epoch=1)
+    run_training(resumed, device="cpu", resume=True)
+    left = torch.load(continuous.path / "final.pt", weights_only=True)
+    right = torch.load(resumed.path / "final.pt", weights_only=True)
+    assert all(torch.equal(left["model_state_dict"][name], tensor)
+               for name, tensor in right["model_state_dict"].items())
+    for a, b in zip(left["training_history"], right["training_history"]):
+        assert {k:v for k,v in a.items() if k != "epoch_seconds"} == {
+            k:v for k,v in b.items() if k != "epoch_seconds"
+        }
+
+
+def test_split_tether_resume_parity_including_statistics(tmp_path):
+    cfg = gradient_config("split-tether", epochs=2)
+    continuous = PlacementRunStore.create(tmp_path, cfg, "continuous-tether")
+    run_training(continuous, device="cpu")
+    resumed = PlacementRunStore.create(tmp_path, cfg, "resumed-tether")
     run_training(resumed, device="cpu", stop_after_epoch=1)
     run_training(resumed, device="cpu", resume=True)
     left = torch.load(continuous.path / "final.pt", weights_only=True)
@@ -482,6 +610,8 @@ def test_cli_variant_selection_and_invalid_variant():
     assert args.gradient_mode == "qdet-pcgrad"
     args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "split-measure"])
     assert args.gradient_mode == "split-measure"
+    args = parser.parse_args(["train", "--version", "0.6.2", "--variant", "D", "--gradient-mode", "split-tether"])
+    assert args.gradient_mode == "split-tether"
     with pytest.raises(SystemExit):
         parser.parse_args(["train", "--version", "0.6.2", "--variant", "Z"])
 
