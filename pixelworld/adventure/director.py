@@ -14,8 +14,8 @@ from pathlib import Path
 
 from .compiler import compile_adventure
 from .models import SCHEMA_VERSION
-from .structured_schema import adventure_spec_json_schema, build_system_prompt
-from .transport import HTTPTransport, StoryDirectorTransport, TransportRequest, TransportResponse, responses_endpoint, validate_base_url
+from .structured_schema import PROVIDER_SCHEMA_NAME, PROVIDER_PROTOCOLS, build_system_prompt, provider_generation_json_schema, wire_to_adventure_spec
+from .transport import HTTPTransport, StoryDirectorTransport, TransportRequest, TransportResponse, protocol_endpoint, validate_base_url
 from .validation import require_valid_game
 
 MAX_MODEL_OUTPUT_BYTES = 128 * 1024
@@ -68,6 +68,7 @@ class OpenAICompatibleConfig:
     base_url: str
     api_key: str
     model: str
+    protocol: str
     connect_timeout: float = 5.0
     read_timeout: float = 20.0
     total_timeout: float = 30.0
@@ -80,6 +81,8 @@ class OpenAICompatibleConfig:
             raise ValueError("LLM API key is required")
         if not isinstance(self.model, str) or not MODEL_PATTERN.fullmatch(self.model):
             raise ValueError("LLM model is required and must be an explicit model identifier")
+        if self.protocol not in PROVIDER_PROTOCOLS:
+            raise ValueError(f"LLM protocol is required and must be one of {', '.join(PROVIDER_PROTOCOLS)}")
         for name in ("connect_timeout", "read_timeout", "total_timeout"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
@@ -90,7 +93,7 @@ class OpenAICompatibleConfig:
             raise ValueError("max_response_bytes must be an integer from 1024 to 2097152")
         if isinstance(self.max_output_tokens, bool) or not isinstance(self.max_output_tokens, int) or not 1 <= self.max_output_tokens <= 50_000:
             raise ValueError("max_output_tokens must be an integer from 1 to 50000")
-        return OpenAICompatibleConfig(base_url, self.api_key, self.model, float(self.connect_timeout), float(self.read_timeout), float(self.total_timeout), self.max_response_bytes, self.max_output_tokens)
+        return OpenAICompatibleConfig(base_url, self.api_key, self.model, self.protocol, float(self.connect_timeout), float(self.read_timeout), float(self.total_timeout), self.max_response_bytes, self.max_output_tokens)
 
 
 class OpenAICompatibleStoryDirector(StoryDirector):
@@ -117,17 +120,17 @@ class OpenAICompatibleStoryDirector(StoryDirector):
         for attempt in (1, 2):
             body = self._request_body(prompt, previous, errors)
             response = self.transport.send(TransportRequest(
-                url=responses_endpoint(self.config.base_url),
+                url=protocol_endpoint(self.config.base_url, self.config.protocol),
                 headers={"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json", "Accept": "application/json"},
                 body=json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"),
                 connect_timeout=self.config.connect_timeout, read_timeout=self.config.read_timeout, total_timeout=self.config.total_timeout, max_response_bytes=self.config.max_response_bytes,
             ))
-            raw = _extract_output_text(response)
+            raw = _extract_output_text(response, self.config.protocol)
             if len(raw.encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
                 raise ValueError("model output exceeds the AdventureSpec response limit")
             self._response_hashes.append(_sha256(raw.encode("utf-8")))
             try:
-                spec = decode_single_json_object(raw)
+                spec = wire_to_adventure_spec(decode_single_json_object(raw))
                 game = compile_adventure(spec)
                 require_valid_game(game)
                 self._attempt_statuses.append({"attempt": attempt, "valid": True, "errors": []})
@@ -142,16 +145,8 @@ class OpenAICompatibleStoryDirector(StoryDirector):
         raise AssertionError("unreachable")
 
     def _request_body(self, prompt, previous, errors):
-        user_text = prompt if previous is None else json.dumps({"task": "Return one complete corrected AdventureSpec JSON object.", "previous_response": previous, "validation_errors": errors}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return {
-            "model": self.config.model,
-            "instructions": build_system_prompt(),
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": user_text}]}],
-            "text": {"format": {"type": "json_schema", "name": "pixelworld_adventure_spec_0_6_3", "strict": True, "schema": adventure_spec_json_schema()}},
-            "max_output_tokens": self.config.max_output_tokens,
-            "store": False,
-            "stream": False,
-        }
+        user_text = prompt if previous is None else json.dumps({"task": "Return one complete corrected pixelworld-adventure-wire-1 JSON object.", "previous_response": previous, "validation_errors": errors}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return build_provider_request_body(self.config, user_text)
 
     def provenance(self, compile_digest: str) -> dict | None:
         if not self._attempt_statuses or not self._attempt_statuses[-1]["valid"]:
@@ -160,7 +155,7 @@ class OpenAICompatibleStoryDirector(StoryDirector):
         return {
             "schema_version": SCHEMA_VERSION,
             "director_type": self.source,
-            "provider_protocol": "openai-responses-v1",
+            "provider_protocol": self.config.protocol,
             "model": self.config.model,
             "base_url": validate_base_url(self.config.base_url),
             "prompt_sha256": self._prompt_hash,
@@ -173,6 +168,26 @@ class OpenAICompatibleStoryDirector(StoryDirector):
             "git_commit": git_commit,
             "git_dirty": git_dirty,
         }
+
+
+def build_provider_request_body(config: OpenAICompatibleConfig, user_text: str) -> dict:
+    schema = provider_generation_json_schema(config.protocol)
+    if config.protocol == "responses-v1":
+        return {
+            "model": config.model,
+            "instructions": build_system_prompt(),
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": user_text}]}],
+            "text": {"format": {"type": "json_schema", "name": PROVIDER_SCHEMA_NAME, "strict": True, "schema": schema}},
+            "max_output_tokens": config.max_output_tokens,
+            "store": False,
+            "stream": False,
+        }
+    return {
+        "model": config.model,
+        "messages": [{"role": "system", "content": build_system_prompt()}, {"role": "user", "content": user_text}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": PROVIDER_SCHEMA_NAME, "strict": True, "schema": schema}},
+        "stream": False,
+    }
 
 
 def decode_single_json_object(raw: str) -> dict:
@@ -210,7 +225,7 @@ def _validate_json_shape(value):
             pending.extend((child, depth + 1) for child in item)
 
 
-def _extract_output_text(response: TransportResponse) -> str:
+def _extract_output_text(response: TransportResponse, protocol: str) -> str:
     if not isinstance(response, TransportResponse) or response.status < 200 or response.status >= 300:
         raise ValueError("model transport returned a non-success response")
     try:
@@ -219,15 +234,31 @@ def _extract_output_text(response: TransportResponse) -> str:
         raise ValueError("model endpoint returned an invalid JSON response envelope") from None
     if not isinstance(envelope, dict):
         raise ValueError("model endpoint response envelope must be an object")
-    if isinstance(envelope.get("output_text"), str):
+    if protocol == "chat-completions-json-schema":
+        choices = envelope.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise ValueError("chat completions endpoint must return exactly one choice")
+        message = choices[0].get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str) or not message["content"].strip():
+            raise ValueError("chat completions endpoint returned an empty or refused model response")
+        return message["content"]
+    if protocol != "responses-v1":
+        raise ValueError("unknown configured LLM protocol")
+    if "output" not in envelope and isinstance(envelope.get("output_text"), str) and envelope["output_text"].strip():
         return envelope["output_text"]
     texts = []
-    for output in envelope.get("output", []):
+    outputs = envelope.get("output", [])
+    if not isinstance(outputs, list):
+        raise ValueError("responses endpoint output must be an array")
+    for output in outputs:
         if isinstance(output, dict):
-            for content in output.get("content", []):
+            content_items = output.get("content", [])
+            if not isinstance(content_items, list):
+                continue
+            for content in content_items:
                 if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str):
                     texts.append(content["text"])
-    if len(texts) != 1:
+    if len(texts) != 1 or not texts[0].strip():
         raise ValueError("model endpoint must return exactly one output_text item")
     return texts[0]
 

@@ -77,7 +77,15 @@ def build_parser():
     adventure_generate.add_argument("--llm-base-url", help="OpenAI-compatible API root; defaults to PIXELWORLD_LLM_BASE_URL")
     adventure_generate.add_argument("--llm-api-key", help="API key; prefer PIXELWORLD_LLM_API_KEY to avoid shell history")
     adventure_generate.add_argument("--llm-model", help="explicit model ID; defaults to PIXELWORLD_LLM_MODEL")
+    adventure_generate.add_argument("--llm-protocol", choices=("responses-v1", "chat-completions-json-schema"), help="explicit provider protocol; defaults to PIXELWORLD_LLM_PROTOCOL")
     adventure_generate.add_argument("--output", required=True)
+
+    director_check = subparsers.add_parser("adventure-director-check", help="check LLM protocol and strict schema compatibility without generating a game")
+    director_check.add_argument("--version", default="0.6.3", choices=("0.6.3",))
+    director_check.add_argument("--llm-base-url", help="OpenAI-compatible API root; defaults to PIXELWORLD_LLM_BASE_URL")
+    director_check.add_argument("--llm-api-key", help="API key; prefer PIXELWORLD_LLM_API_KEY to avoid shell history")
+    director_check.add_argument("--llm-model", help="explicit model ID; defaults to PIXELWORLD_LLM_MODEL")
+    director_check.add_argument("--llm-protocol", required=False, choices=("responses-v1", "chat-completions-json-schema"), help="required explicitly or via PIXELWORLD_LLM_PROTOCOL")
 
     adventure_validate = subparsers.add_parser("adventure-validate", help="validate and compile an AdventureSpec")
     adventure_validate.add_argument("--spec", required=True)
@@ -230,9 +238,29 @@ def command_adventure_generate(args):
             base_url=args.llm_base_url or os.environ.get("PIXELWORLD_LLM_BASE_URL", ""),
             api_key=args.llm_api_key or os.environ.get("PIXELWORLD_LLM_API_KEY", ""),
             model=args.llm_model or os.environ.get("PIXELWORLD_LLM_MODEL", ""),
+            protocol=args.llm_protocol or os.environ.get("PIXELWORLD_LLM_PROTOCOL", ""),
         ))
     result = generate_adventure(director, args.prompt, args.output)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def command_adventure_director_check(args):
+    import os
+
+    from .adventure.director import OpenAICompatibleConfig
+    from .adventure.preflight import check_story_director
+    from .adventure.transport import HTTPTransport
+
+    config = OpenAICompatibleConfig(
+        base_url=args.llm_base_url or os.environ.get("PIXELWORLD_LLM_BASE_URL", ""),
+        api_key=args.llm_api_key or os.environ.get("PIXELWORLD_LLM_API_KEY", ""),
+        model=args.llm_model or os.environ.get("PIXELWORLD_LLM_MODEL", ""),
+        protocol=args.llm_protocol or os.environ.get("PIXELWORLD_LLM_PROTOCOL", ""),
+    )
+    report = check_story_director(config, HTTPTransport())
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if not report["ok"]:
+        raise RuntimeError("story director compatibility check failed")
 
 
 def command_adventure_validate(args):
@@ -269,6 +297,7 @@ def main(argv=None):
         "golden": command_golden,
         "study-placement": command_study_placement,
         "adventure-generate": command_adventure_generate,
+        "adventure-director-check": command_adventure_director_check,
         "adventure-validate": command_adventure_validate,
         "adventure-solve": command_adventure_solve,
     }
